@@ -4,6 +4,18 @@ Smart automatic energy meter switching system for ESP8266 NodeMCU (ESP-12E).
 
 This project reads live electrical values from a PZEM-004T V3 module, controls up to 3 relay-driven meter/load lines, and provides a built-in web dashboard over WiFi Access Point mode.
 
+## Project Status
+
+> Work in progress: this project is still under development.
+>
+> Testing status: not fully tested yet on all real-world conditions and hardware scenarios.
+
+The project is continuing and more improvements, fixes, and validation steps are planned.
+
+## Project Image
+
+Project hardware/dashboard image will be added in a future update.
+
 ## Main Features
 
 - 3-channel relay switching (active-LOW outputs)
