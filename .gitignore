@@ -1,0 +1,21 @@
+# OS / Editor
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+
+# Arduino build artifacts
+*.elf
+*.hex
+*.bin
+*.map
+*.eep
+*.lss
+*.lst
+*.o
+*.d
+build/
+*.tmp
+
+# Logs
+*.log

@@ -1,0 +1,407 @@
+================================================================
+  Smart Automatic Energy Meter Switching System
+  ESP8266 NodeMCU (ESP-12E) — Complete Project Guide
+  Created by: Eng-Nabeel
+================================================================
+
+
+================================================================
+  SECTION 1 — REQUIRED LIBRARIES
+  (Install via Arduino IDE > Sketch > Include Library > Manage)
+================================================================
+
+  Library Name          Author              Version
+  ─────────────────────────────────────────────────
+  PZEM004Tv30           Jakub Mandula       Latest
+  RTClib                Adafruit            Latest
+  ArduinoJson           Benoit Blanchon     v6.x
+
+  Built-in (no install needed — part of ESP8266 core):
+    ESP8266WiFi
+    ESP8266WebServer
+    SoftwareSerial
+    Wire
+    EEPROM
+
+
+================================================================
+  SECTION 2 — BOARD SETUP IN ARDUINO IDE
+================================================================
+
+  1. Add ESP8266 board URL in File > Preferences > Board Manager:
+       http://arduino.esp8266.com/stable/package_esp8266com_index.json
+
+  2. Install "esp8266" by ESP8266 Community from Boards Manager.
+
+  3. Select board:
+       Tools > Board > ESP8266 Boards > NodeMCU 1.0 (ESP-12E Module)
+
+  4. Settings:
+       Upload Speed   : 115200
+       CPU Frequency  : 80 MHz
+       Flash Size     : 4MB (FS:2MB OTA:~1019KB)
+       Port           : Select the COM port of your NodeMCU
+
+
+================================================================
+  SECTION 3 — PIN CONFIGURATION
+================================================================
+
+  ESP8266 Pin  Arduino Label  Connected To         Notes
+  ──────────────────────────────────────────────────────────────
+  GPIO14       D5             Relay Module 1 IN    Active LOW
+  GPIO12       D6             Relay Module 2 IN    Active LOW
+  GPIO13       D7             Relay Module 3 IN    Active LOW
+  GPIO0        D3             PZEM-004T TX pin     PZEM TX → ESP D3
+  GPIO2        D4             PZEM-004T RX pin     ESP D4 → PZEM RX
+  GPIO4        D2             DS3231 RTC SDA        I2C Data
+  GPIO5        D1             DS3231 RTC SCL        I2C Clock
+  GPIO15       D8             Button: Emergency    Has INT pull-up
+
+  RELAY WIRING (each relay module):
+  ──────────────────────────────────
+    VCC  → 5V (NodeMCU VIN or external 5V supply)
+    GND  → GND
+    IN   → ESP GPIO (as shown above)
+    COM  → Incoming line (from meter / supply)
+    NO   → Load output  (Normally Open — load connected here)
+    NC   → Not used
+
+  PZEM-004T V3 WIRING:
+  ──────────────────────────────────
+    5V   → 5V supply
+    GND  → Common GND
+    TX   → GPIO0 (D3) on NodeMCU
+    RX   → GPIO2 (D4) on NodeMCU
+    (Also wire current transformer CT clamp around live wire)
+
+  DS3231 RTC WIRING:
+  ──────────────────────────────────
+    VCC  → 3.3V
+    GND  → GND
+    SDA  → D2 (GPIO4)
+    SCL  → D1 (GPIO5)
+    (Install CR2032 coin cell battery for backup)
+
+  BUTTON WIRING (Emergency):
+  ──────────────────────────────────
+    One terminal → D8 (GPIO15)
+    Other terminal → GND
+    (Internal pull-up used; press = LOW signal)
+
+
+================================================================
+  SECTION 4 — WiFi / NETWORK CONFIGURATION
+================================================================
+
+  Mode     : Access Point (AP) — no router needed
+  SSID     : SmartMeterATS
+  Password : 12345678
+  IP       : 192.168.4.1
+
+  Steps to connect:
+    1. Power on the NodeMCU.
+    2. On your phone/PC, connect to WiFi "SmartMeterATS".
+    3. Open a browser and go to:  http://192.168.4.1/
+    4. Dashboard will load automatically.
+
+
+================================================================
+  SECTION 5 — DASHBOARD FEATURES OVERVIEW
+================================================================
+
+  ┌──────────────────────────────────────────────────────────┐
+  │  HEADER                                                  │
+  │  Smart Meter ATS                    [PZEM Badge] [Mode]  │
+  │  Eng-Nabeel                                              │
+  └──────────────────────────────────────────────────────────┘
+
+  Badges (top-right):
+    • PZEM Connected  → Green   (sensor is online)
+    • PZEM Offline    → Red     (sensor not detected)
+    • AUTO            → Blue    (automatic meter switching)
+    • BYPASS          → Amber   (manual bypass mode active)
+    • EMERGENCY       → Red     (all relays OFF)
+    • FAULT           → Red     (protection tripped)
+
+  ┌─────────────────────────────────────────────────────┐
+  │  FAULT BANNER (shown only when protection trips)    │
+  │  ⚠ PROTECTION TRIP — All Relays OFF                │
+  │  Reason: Over Voltage: 263.4V (limit 250V)          │
+  │                              [✓ Clear Fault]        │
+  └─────────────────────────────────────────────────────┘
+
+  ┌────────────────────────────────────────────────────────┐
+  │  LIVE METRICS CARDS (4 cards, top of page)             │
+  │  🔌 Voltage (V)  ⚡ Current (A)  💡 Power (W)          │
+  │  📈 Energy (kWh)                                       │
+  │  → Show "--" when PZEM is offline                      │
+  └────────────────────────────────────────────────────────┘
+
+  ┌────────────────────────────────────────────────────────┐
+  │  METER STATUS CARD                                     │
+  │  Shows 3 meters with progress bars:                    │
+  │  • ACTIVE   → Blue border + animated blue dot          │
+  │  • STANDBY  → Normal style                             │
+  │  • DISABLED → Greyed out                               │
+  │  Progress bar colours:                                 │
+  │    0-69%   Blue (normal)                               │
+  │    70-89%  Orange (warning)                            │
+  │    90-100% Red (danger / near limit)                   │
+  └────────────────────────────────────────────────────────┘
+
+  ┌────────────────────────────────────────────────────────┐
+  │  ENERGY LIMITS CARD                                    │
+  │  • Set kWh limit per meter (e.g. 5.0 kWh)             │
+  │  • Toggle switch to enable/disable each meter          │
+  │  • [Save Limits] → stores to EEPROM                   │
+  │  • System auto-switches when limit is reached          │
+  └────────────────────────────────────────────────────────┘
+
+  ┌────────────────────────────────────────────────────────┐
+  │  ENERGY STATISTICS CARD                                │
+  │  ☀ Today Used      (kWh)                               │
+  │  📅 This Month     (kWh)                               │
+  │  🕰 Last Month     (kWh)                               │
+  │  📆 Next Reset Date (1st of next month)                │
+  └────────────────────────────────────────────────────────┘
+
+  ┌────────────────────────────────────────────────────────┐
+  │  30-DAY USAGE GRAPH                                    │
+  │  Bar chart (30 bars) — oldest on left, today on right  │
+  │  Today's bar = Cyan colour                             │
+  │  Hover any bar → shows exact kWh value as tooltip      │
+  │  Bars scale relative to highest day                    │
+  └────────────────────────────────────────────────────────┘
+
+  ┌────────────────────────────────────────────────────────┐
+  │  MANUAL CONTROLS CARD                                  │
+  │  • Switch to Meter: dropdown + [→ Switch Meter]        │
+  │  • [🔄 Reset Energy] → resets kWh counters             │
+  │  • [⚠ Emergency OFF] → all relays off immediately      │
+  └────────────────────────────────────────────────────────┘
+
+  ┌────────────────────────────────────────────────────────┐
+  │  PROTECTION SETTINGS CARD                              │
+  │  • Over Voltage  threshold (V)   default: 250V         │
+  │  • Under Voltage threshold (V)   default: 180V         │
+  │  • Over Current  threshold (A)   user-defined          │
+  │  • [💾 Save Thresholds] → stores to EEPROM             │
+  │  • [○ Clear Fault]     → restores relay after trip     │
+  └────────────────────────────────────────────────────────┘
+
+
+================================================================
+  SECTION 6 — PROTECTION SYSTEM
+================================================================
+
+  The system monitors PZEM readings every 2 seconds.
+  If PZEM is connected and any threshold is exceeded,
+  ALL relays are cut off immediately (fail-safe).
+
+  FAULT CONDITIONS:
+  ─────────────────
+    Over Voltage  : Voltage > OV threshold (default 250V)
+    Under Voltage : Voltage < UV threshold (default 180V)
+                    (only triggers when voltage > 10V to
+                     avoid false trip when PZEM is offline)
+    Over Current  : Current > OC threshold (default 16A)
+
+  ON TRIP:
+  ─────────
+    1. All 3 relays switch OFF instantly.
+    2. Buzzer sounds for 800ms.
+    3. Red FAULT badge flashes in header.
+    4. Fault banner appears showing the exact reason
+       (e.g. "Over Voltage: 265.2V (limit 250V)").
+    5. Auto-switching logic is blocked.
+    6. Manual meter switching is blocked.
+    7. Fault is logged to Serial Monitor.
+
+  CLEARING A FAULT:
+  ─────────────────
+    Option A: Click [✓ Clear Fault] on the fault banner.
+    Option B: Click [○ Clear Fault] in Protection Settings.
+    Both call /api/clearFault → relay is restored.
+
+  ADJUSTING THRESHOLDS:
+  ──────────────────────
+    Enter new values in Protection Settings card.
+    Click [💾 Save Thresholds].
+    Values are saved to EEPROM and persist after power loss.
+
+    Over Voltage  : valid range 220V – 300V
+    Under Voltage : valid range 100V – 220V
+    Over Current  : valid range 0.1A – 200A
+
+
+================================================================
+  SECTION 7 — AUTOMATIC METER SWITCHING LOGIC
+================================================================
+
+  1. System starts on Meter 1 (index 0) by default.
+  2. Every 2 seconds, PZEM energy is read.
+  3. When active meter's energyUsed >= energyLimit:
+       - Buzzer beeps (300ms)
+       - Next enabled meter is selected (wraps around)
+       - All relays switched OFF
+       - 500ms safety delay
+       - New meter relay switched ON
+       - PZEM energy baseline reset for new meter
+       - Settings saved to EEPROM
+  4. If all meters exhaust their limits → stays on current meter.
+  5. Logic is blocked during: EMERGENCY, BYPASS, PROTECTION TRIP.
+
+
+================================================================
+  SECTION 8 — PHYSICAL BUTTONS
+================================================================
+
+  Button         GPIO   Function
+  ────────────────────────────────────────
+  Emergency OFF  D8     Cuts all relays — immediate shutdown
+
+  Button is debounced (50ms). Uses internal pull-up (GPIO15).
+
+
+================================================================
+  SECTION 9 — EEPROM DATA PERSISTENCE
+================================================================
+
+  The following data survives power loss / reboot:
+
+  Address  Size    Data
+  ─────────────────────────────────────────────
+  0        1B      Magic byte (validity check)
+  1        12B     3x energy limits (float each)
+  13       3B      3x meter enabled flags
+  16       1B      Active meter index
+  17       1B      Bypass mode state
+  18       120B    30x daily usage values (float each)
+  138      1B      Daily rolling index
+  139      4B      Today used (kWh)
+  143      4B      Current month used (kWh)
+  147      4B      Last month used (kWh)
+  151      4B      Over-voltage threshold
+  155      4B      Under-voltage threshold
+  159      4B      Over-current threshold
+
+  EEPROM total used: ~163 bytes of 256 allocated.
+
+  NOTE: On first flash, EEPROM will have no magic byte.
+  System will load all default values automatically.
+
+
+================================================================
+  SECTION 10 — REST API ENDPOINTS
+================================================================
+
+  All endpoints are HTTP GET at 192.168.4.1
+
+  Endpoint                Parameters                Description
+  ─────────────────────────────────────────────────────────────
+  /api/status             (none)                    Full system JSON
+  /api/setLimits          l0, l1, l2  (kWh)         Set meter limits
+  /api/setEnabled         idx (0-2), val (0/1)      Enable/disable meter
+  /api/switchMeter        m (0-2)                   Manual meter switch
+  /api/resetEnergy        (none)                    Reset kWh counters
+  /api/emergency          (none)                    All relays OFF
+  /api/setProtection      ov, uv, oc (V/V/A)        Set prot thresholds
+  /api/clearFault         (none)                    Clear prot trip
+
+  Example:
+    http://192.168.4.1/api/setLimits?l0=10&l1=8&l2=6
+    http://192.168.4.1/api/setProtection?ov=248&uv=185&oc=20
+
+
+================================================================
+  SECTION 11 — SERIAL MONITOR DEBUG OUTPUT
+================================================================
+
+  Baud Rate: 115200
+
+  Every 3 seconds, the system prints:
+    ------ STATUS ------
+    Voltage  : 230.5 V
+    Current  : 2.34 A
+    Power    : 539.4 W
+    Energy   : 0.125 kWh
+    Active   : Meter 1
+    Relay1   : ON
+    Relay2   : OFF
+    Relay3   : OFF
+    Mode     : AUTO
+    PROT     : TRIP - Over Voltage: 265.2V (limit 250V)  ← only if tripped
+    --------------------
+
+  Boot messages:
+    [BOOT]  System starting / ready
+    [PINS]  GPIO configured
+    [RTC]   DS3231 status + current date/time
+    [PZEM]  Software serial started
+    [WiFi]  AP started with IP
+    [WEB]   HTTP server started
+    [RELAY] Meter X ON
+    [SWITCH] Limit reached, switching
+    [RESET] Monthly reset triggered
+    [PROT]  TRIP: fault reason
+    [EEPROM] Settings saved/loaded
+
+
+================================================================
+  SECTION 12 — MONTHLY RESET BEHAVIOUR
+================================================================
+
+  Triggered by DS3231 RTC on the 1st of every month at midnight.
+
+  What resets:
+    • todayUsed = 0
+    • currentMonthUsed = 0 (previous value saved to lastMonthUsed)
+    • All meter energyUsed counters = 0
+    • PZEM energy baseline updated
+    • emergencyOff = false
+    • bypassMode = false
+    • System switches back to Meter 1
+    • Buzzer sounds (500ms)
+    • Settings saved to EEPROM
+
+  Dashboard will reflect the reset on next poll (within 3 seconds).
+
+
+================================================================
+  SECTION 13 — TROUBLESHOOTING
+================================================================
+
+  Problem                          Solution
+  ─────────────────────────────────────────────────────────────
+  PZEM shows OFFLINE               Check TX/RX wiring on D3/D4
+                                   Check PZEM power supply (5V)
+                                   Ensure baud rate = 9600
+
+  RTC not found                    Check SDA/SCL wiring
+                                   Check 3.3V power to DS3231
+                                   Install CR2032 battery
+
+  Dashboard not loading            Connect to WiFi SmartMeterATS
+                                   Go to http://192.168.4.1/
+                                   Check NodeMCU is powered
+
+  Relay not switching              Check relay VCC is 5V
+                                   Confirm RELAY_ON = LOW (active low)
+                                   Verify GPIO pin with Serial monitor
+
+  False FAULT trips                Adjust thresholds in Protection Settings
+                                   Click Clear Fault on dashboard
+
+  Values show 0 at startup         Normal — PZEM needs a few seconds
+                                   to start reporting valid readings
+
+  Energy not accumulating          Ensure PZEM CT clamp is around live wire
+                                   Check PZEM reads valid kWh via Serial
+
+
+================================================================
+  END OF GUIDE
+  Smart Meter ATS — ESP8266 NodeMCU Project
+  Created by Eng-Nabeel
+================================================================

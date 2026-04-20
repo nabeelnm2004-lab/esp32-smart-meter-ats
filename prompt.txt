@@ -1,0 +1,283 @@
+You are a senior embedded systems engineer specializing in IoT energy management devices.
+
+Your task is to generate complete production-level firmware for an ESP8266-based Smart Automatic Energy Meter Switching System.
+
+The firmware must be robust, modular, and safe for controlling AC power relays.
+
+---
+
+## PROJECT OVERVIEW
+
+This device automatically switches electrical load between three electricity meters based on energy consumption limits.
+
+The goal is to distribute electricity usage across multiple meters automatically.
+
+Example use cases:
+
+* Hostels
+* Apartment buildings
+* Shops with multiple electricity meters
+
+---
+
+## HARDWARE COMPONENTS
+
+Controller:
+ESP8266 NodeMCU
+
+Energy Measurement:
+PZEM-004T V3 energy meter module
+
+Switching:
+3 relay modules controlling three meter inputs
+
+Timekeeping:
+DS3231 RTC module for accurate time and monthly reset
+
+Inputs:
+3 push buttons
+
+* Manual Select
+* Manual Bypass
+* Emergency OFF
+
+Outputs:
+
+* Buzzer
+* 3 relays
+
+Load:
+Single AC load
+
+---
+
+## POWER ARCHITECTURE
+
+Meter1 → Relay1
+Meter2 → Relay2
+Meter3 → Relay3
+
+Relay outputs combine to a single line.
+
+Combined output → CT sensor → Load.
+
+Neutral wires from all meters are common.
+
+Only one relay must be active at any time.
+
+---
+
+## ENERGY MEASUREMENT LOGIC
+
+Only ONE PZEM module is used.
+
+The PZEM is placed after the relay outputs so it automatically measures the active meter.
+
+Measurements required:
+
+Voltage
+Current
+Power
+Energy (kWh)
+
+---
+
+## AUTOMATIC SWITCHING LOGIC
+
+Each meter has a user-defined energy limit.
+
+Example:
+
+Meter1 limit = 5 units
+Meter2 limit = 5 units
+Meter3 limit = 5 units
+
+When energy consumed reaches the limit for the active meter:
+
+1. Turn OFF current relay
+2. Wait 500 milliseconds
+3. Turn ON next relay
+
+Switch order:
+
+Meter1 → Meter2 → Meter3
+
+If a meter is disabled, it must be skipped.
+
+---
+
+## MONTHLY RESET SYSTEM
+
+Using DS3231 RTC.
+
+At:
+
+Day = 1
+Time = 00:00
+
+System must:
+
+Reset energy counters
+Reset meter sequence
+Start again from Meter1
+
+---
+
+## WEB DASHBOARD
+
+ESP8266 must host a web dashboard.
+
+The device must create its own WiFi access point.
+
+SSID: SmartMeterATS
+Password: 12345678
+
+Dashboard must show:
+
+Real-time values
+Voltage
+Current
+Power
+Energy consumption
+Active meter
+
+User controls:
+
+Set energy limit for Meter1
+Set energy limit for Meter2
+Set energy limit for Meter3
+
+Enable/disable each meter
+
+Manual meter switch
+
+Reset energy counter
+
+---
+
+## OFFLINE OPERATION
+
+System must work without internet.
+
+User connects directly to ESP8266 WiFi.
+
+---
+
+## BUTTON BEHAVIOR
+
+Manual Select:
+Cycles through meters manually.
+
+Manual Bypass:
+Disables automatic switching and locks the selected relay.
+
+Emergency OFF:
+Immediately turns OFF all relays and triggers buzzer.
+
+---
+
+## SAFETY REQUIREMENTS
+
+Two relays must never be ON simultaneously.
+
+Safe switching sequence must always be:
+
+RelayX OFF
+delay 500 ms
+RelayY ON
+
+---
+
+## DATA STORAGE
+
+Use EEPROM or LittleFS to store:
+
+Energy limits
+Meter enabled states
+Last active meter
+Bypass state
+
+---
+
+## ALERT SYSTEM
+
+Buzzer activates when:
+
+Meter limit reached
+Relay switching occurs
+Emergency shutdown triggered
+
+---
+
+## SERIAL DEBUG OUTPUT
+
+Serial monitor must print:
+
+Voltage
+Current
+Power
+Energy
+Active meter
+Relay states
+System mode
+
+---
+
+## PIN CONFIGURATION
+
+Relay1 = D1
+Relay2 = D2
+Relay3 = D3
+
+PZEM RX = D5
+PZEM TX = D6
+
+Buzzer = D7
+
+Manual Select Button = D8
+Manual Bypass Button = D0
+Emergency OFF Button = D4
+
+---
+
+## LIBRARIES TO USE
+
+ESP8266WiFi
+ESP8266WebServer
+PZEM004Tv30
+RTClib
+ArduinoJson
+EEPROM
+
+---
+
+## CODE REQUIREMENTS
+
+Code must be:
+
+Fully commented
+Modular
+Non-blocking
+Stable
+Production ready
+
+Organize code into functions:
+
+setupWiFi()
+readEnergyData()
+handleRelayLogic()
+handleButtons()
+handleMonthlyReset()
+handleWebServer()
+saveSettings()
+loadSettings()
+
+---
+
+## OUTPUT FORMAT
+
+Return:
+
+Complete Arduino firmware
+Ready to compile and upload
+Clean HTML dashboard embedded in firmware
