@@ -51,7 +51,7 @@ Rules enforced by the design:
 | 1 | 25 | 6  | 13 |
 | 2 | 26 | 7  | 4  |
 | 3 | 27 | 8  | 18 |
-| 4 | 14 | 9  | 19 |
+| 4 | 33 | 9  | 19 |
 | 5 | 32 | 10 | 23 |
 
 Other connections:
@@ -60,7 +60,7 @@ Other connections:
 - GPIO17 — ESP TX → PZEM RX (UART2)
 - GPIO21 — RTC SDA
 - GPIO22 — RTC SCL
-- GPIO33 — Emergency button (to GND, internal pull-up)
+- GPIO35 — Emergency button (to GND, external ~10kΩ pull-up; input-only pin)
 
 ## WiFi Access Point
 
