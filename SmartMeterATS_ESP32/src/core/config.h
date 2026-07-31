@@ -21,7 +21,7 @@ namespace config {
 // ------------------------------------------------------------
 //  Firmware identity
 // ------------------------------------------------------------
-constexpr const char* FW_VERSION = "2.1.0";
+constexpr const char* FW_VERSION = "2.2.0";
 #define FW_BUILD  __DATE__ " " __TIME__
 
 // ------------------------------------------------------------
