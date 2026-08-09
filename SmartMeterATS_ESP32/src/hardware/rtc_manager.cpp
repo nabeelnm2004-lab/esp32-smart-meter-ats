@@ -30,6 +30,17 @@ void begin() {
   state::rtcLostPower = chip.lostPower();
 
   const DateTime t = chip.now();
+  // A corrupt I2C read can return a structurally invalid date (e.g. month or
+  // day 0, out-of-range year). Seeding bootEpoch from that poisons every
+  // event-log timestamp until the next sync, so only trust a valid DateTime.
+  // On a bad read, route through the existing untrustworthy-time path so the
+  // stored time is treated as needing a sync, and leave bootEpoch alone.
+  if (!t.isValid()) {
+    state::rtcLostPower = true;
+    Serial.println(F("[RTC] Invalid date read — awaiting time sync"));
+    return;
+  }
+
   state::bootEpoch = t.unixtime() - eventlog::uptimeSeconds();
   state::lastDay   = t.day();
 
