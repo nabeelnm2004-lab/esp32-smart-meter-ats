@@ -35,7 +35,14 @@ String escape(const String& raw) {
 }
 
 void sendCommonHeaders(WebServer& server) {
-  server.sendHeader("Access-Control-Allow-Origin", "*");
+  // The dashboard is served from the device's own root, so every API
+  // call is same-origin and needs no CORS grant. A wildcard
+  // Access-Control-Allow-Origin would instead let any website the
+  // operator visits script this device's endpoints from their browser,
+  // so it is deliberately NOT sent. Non-browser clients (curl, scripts)
+  // ignore CORS regardless. Belt-and-braces hardening headers live here
+  // as the single place every JSON response passes through.
+  server.sendHeader("X-Content-Type-Options", "nosniff");
 }
 
 void sendOk(WebServer& server) {
