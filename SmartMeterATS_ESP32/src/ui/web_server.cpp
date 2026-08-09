@@ -5,6 +5,7 @@
 #include <WiFi.h>
 
 #include "../core/config.h"
+#include "../core/auth_manager.h"
 #include "../core/event_log.h"
 #include "../core/meter_controller.h"
 #include "../core/system_state.h"
@@ -39,13 +40,21 @@ WebServer server(config::HTTP_PORT);
 //  Helpers
 // ------------------------------------------------------------
 
-// Gate for the mutating routes. Reuses the OTA password (NVS "otapass")
-// with HTTP Basic auth. On failure it sends a plain 401 JSON (no native
-// WWW-Authenticate dialog — the dashboard attaches the header itself).
+// Gate for the mutating routes. Full control requires the Admin role
+// (config::AUTH_USER + the device secret). The read-only Viewer role is
+// deliberately rejected here — Viewers may poll telemetry but must never
+// reach a route that changes device state. Role logic lives in
+// core::auth so the boundary is defined in exactly one place.
 bool requireAuth() {
-  if (server.authenticate(config::AUTH_USER, state::otaPassword.c_str())) return true;
-  json::sendError(server, 401, F("auth required"));
-  return false;
+  return core::auth::requireRole(server, core::auth::ROLE_ADMIN);
+}
+
+// Wrap a handler so the request is rejected with 401 unless it carries
+// valid Basic auth. Every relay-actuating, config-mutating or
+// secret-exposing route is registered through this in begin(), so the
+// auth boundary lives in exactly one auditable place.
+WebServer::THandlerFunction authed(WebServer::THandlerFunction fn) {
+  return [fn]() { if (requireAuth()) fn(); };
 }
 
 // Translate a rejected controller Result into a documented HTTP code.
@@ -69,7 +78,7 @@ void handleStatus() {
   doc["voltage"]     = state::pzemOK ? state::liveVoltage : 0.0f;
   doc["current"]     = state::pzemOK ? state::liveCurrent : 0.0f;
   doc["power"]       = state::pzemOK ? state::livePower   : 0.0f;
-  doc["energy"]      = state::liveEnergy;
+  doc["energy"]      = state::pzemOK ? state::liveEnergy   : 0.0f;
   doc["meterCount"]  = state::activeMeterCount;
   doc["maxMeters"]   = MAX_METERS;
   doc["activeMeter"] = state::activeMeter;
@@ -81,6 +90,33 @@ void handleStatus() {
   doc["lastMonth"]   = state::lastMonthUsed;
   doc["protTrip"]    = state::protTrip;
   doc["protReason"]  = state::protReason;
+  // Auto-recovery view for the dashboard fault panel. Phase is derived from
+  // the same latch the scheduler blocks on, so it can never disagree.
+  const char* faultName =
+      state::protFaultType == state::PROT_FAULT_OV ? "Over Voltage" :
+      state::protFaultType == state::PROT_FAULT_UV ? "Under Voltage" :
+      state::protFaultType == state::PROT_FAULT_OC ? "Over Current" : "";
+  const unsigned long recDelay =
+      state::protFaultType == state::PROT_FAULT_UV ? state::uvRecoveryMs :
+      state::protFaultType == state::PROT_FAULT_OC ? state::ocRecoveryMs :
+                                                     state::ovRecoveryMs;
+  int recCountdown = 0;
+  if (state::protRecovering) {
+    const unsigned long elapsed = millis() - state::protRecoverStartMs;
+    recCountdown = (elapsed >= recDelay)
+                     ? 0
+                     : (int)((recDelay - elapsed + 999UL) / 1000UL);   // ceil to whole s
+  }
+  doc["faultName"]        = faultName;
+  doc["faultStatus"]      = !state::protTrip     ? "cleared"
+                          : state::protRecovering ? "recovering" : "active";
+  doc["recoverCountdown"] = recCountdown;
+  doc["recoverDelay"]     = (state::protFaultType != state::PROT_FAULT_NONE)
+                              ? (int)(recDelay / 1000UL) : 0;
+  doc["lastFaultEpoch"]   = state::lastFaultEpoch;
+  doc["ovRec"]            = (int)(state::ovRecoveryMs / 1000UL);
+  doc["uvRec"]            = (int)(state::uvRecoveryMs / 1000UL);
+  doc["ocRec"]            = (int)(state::ocRecoveryMs / 1000UL);
   doc["resetDay"]    = state::monthlyResetDay;
   doc["ovVolt"]      = state::ovVoltThresh;
   doc["uvVolt"]      = state::uvVoltThresh;
@@ -94,6 +130,9 @@ void handleStatus() {
   doc["staSsid"]    = state::staSsid;
   doc["staOK"]      = wifi::isStationConnected();
   doc["staIP"]      = wifi::isStationConnected() ? WiFi.localIP().toString() : "";
+  doc["apIP"]       = WiFi.softAPIP().toString();
+  doc["staRssi"]    = wifi::isStationConnected() ? WiFi.RSSI() : 0;
+  doc["staFallback"] = wifi::inApFallback();
   doc["otaReady"]   = ota::isReady();
   doc["testMode"]   = state::testMode;
   doc["testLeft"]   = state::testMode
@@ -116,6 +155,11 @@ void handleStatus() {
   }
   STATE_UNLOCK();
 
+  // Uptime + live RTC time so every "Live Status" card reads from this one
+  // poll instead of also depending on /api/sysinfo. Both are existing data
+  // (uptime is millis-based; the RTC read already happens here for the reset
+  // date) — no new sources, just surfaced on the status endpoint.
+  doc["uptime"] = eventlog::uptimeSeconds();
   // RTC time so the dashboard can compute the next reset date. I2C is
   // Core 1 only and this handler runs on Core 1.
   if (state::rtcOK) {
@@ -123,6 +167,8 @@ void handleStatus() {
     doc["rtcDay"]   = now.day();
     doc["rtcMonth"] = now.month();
     doc["rtcYear"]  = now.year();
+    doc["rtcHour"]  = now.hour();
+    doc["rtcMin"]   = now.minute();
   }
 
   String out;
@@ -130,14 +176,19 @@ void handleStatus() {
   json::sendJson(server, out);
 }
 
-// GET /api/wifiStatus — polled by the dashboard's WiFi modal.
+// GET /api/wifiStatus — polled by the dashboard's WiFi tab. This is the
+// single status source for the Wi-Fi UI: it carries the current mode, the
+// station link state, both IPs and the last error verbatim so the front
+// end never has to interpret raw radio state.
 void handleWifiStatus() {
   StaticJsonDocument<config::JSON_WIFI_STATUS_SIZE> doc;
-  doc["mode"]  = state::wifiMode;
-  doc["staOK"] = wifi::isStationConnected();
-  doc["ssid"]  = state::staSsid;
-  doc["staIP"] = wifi::isStationConnected() ? WiFi.localIP().toString() : "";
-  doc["rssi"]  = wifi::isStationConnected() ? WiFi.RSSI() : 0;
+  doc["mode"]    = state::wifiMode;
+  doc["staOK"]   = wifi::isStationConnected();
+  doc["ssid"]    = state::staSsid;
+  doc["staIP"]   = wifi::isStationConnected() ? WiFi.localIP().toString() : "";
+  doc["apIP"]    = WiFi.softAPIP().toString();
+  doc["rssi"]    = wifi::isStationConnected() ? WiFi.RSSI() : 0;
+  doc["fallback"] = wifi::inApFallback();
   if (wifi::lastError().length()) doc["err"] = wifi::lastError();
   String out;
   serializeJson(doc, out);
@@ -147,6 +198,18 @@ void handleWifiStatus() {
 // GET /api/scanWiFi — list visible networks (blocking scan).
 void handleScanWiFi() {
   json::sendJson(server, wifi::scanNetworksJson());
+}
+
+// GET /api/disconnectWiFi — drop the station link, keep the AP.
+void handleDisconnectWiFi() {
+  wifi::disconnectStation();
+  json::sendOk(server);
+}
+
+// GET /api/forgetWiFi — erase saved credentials, fall back to AP only.
+void handleForgetWiFi() {
+  wifi::forgetNetwork();
+  json::sendOk(server);
 }
 
 // GET /api/events — newest-last JSON list. Snapshotted under the lock
@@ -299,14 +362,17 @@ void handleSetLimits() {
 
 // GET /api/setEnabled?idx=0..N-1&val=0/1
 void handleSetEnabled() {
-  if (server.hasArg("idx") && server.hasArg("val")) {
-    int idx = server.arg("idx").toInt();
-    STATE_LOCK();
-    bool valid = (idx >= 0 && idx < state::activeMeterCount);
-    if (valid) state::meters[idx].enabled = (server.arg("val").toInt() == 1);
-    STATE_UNLOCK();
-    if (valid) nvs::markDirty();   // toggling several in a row batches
+  if (!server.hasArg("idx") || !server.hasArg("val")) {
+    json::sendError(server, 400, F("idx and val required"));
+    return;
   }
+  int idx = server.arg("idx").toInt();
+  STATE_LOCK();
+  bool valid = (idx >= 0 && idx < state::activeMeterCount);
+  if (valid) state::meters[idx].enabled = (server.arg("val").toInt() == 1);
+  STATE_UNLOCK();
+  if (!valid) { json::sendError(server, 400, F("idx out of range")); return; }
+  nvs::markDirty();   // toggling several in a row batches
   json::sendOk(server);
 }
 
@@ -323,7 +389,6 @@ void handleResetEnergy() {
 
 // GET /api/emergency — authenticated hard OFF.
 void handleEmergency() {
-  if (!requireAuth()) return;
   sendResult(controller::requestEmergencyOff("web"), 409);
 }
 
@@ -345,6 +410,23 @@ void handleSetProtection() {
     float v = server.arg("oc").toFloat();
     if (v >= config::OVER_CURRENT_MIN && v <= config::OVER_CURRENT_MAX)
       state::ocCurrThresh = v;
+  }
+  // Optional recovery stability windows (milliseconds). Absent args leave
+  // the current value untouched; present ones clamp to the anti-chatter range.
+  if (server.hasArg("ovrec")) {
+    long v = server.arg("ovrec").toInt();
+    if (v >= (long)config::RECOVERY_MS_MIN && v <= (long)config::RECOVERY_MS_MAX)
+      state::ovRecoveryMs = (unsigned long)v;
+  }
+  if (server.hasArg("uvrec")) {
+    long v = server.arg("uvrec").toInt();
+    if (v >= (long)config::RECOVERY_MS_MIN && v <= (long)config::RECOVERY_MS_MAX)
+      state::uvRecoveryMs = (unsigned long)v;
+  }
+  if (server.hasArg("ocrec")) {
+    long v = server.arg("ocrec").toInt();
+    if (v >= (long)config::RECOVERY_MS_MIN && v <= (long)config::RECOVERY_MS_MAX)
+      state::ocRecoveryMs = (unsigned long)v;
   }
   STATE_UNLOCK();
   nvs::markDirty();   // thresholds are routine config — batch
@@ -486,7 +568,6 @@ void handleClearEvents() {
 // validated with the same clamps load() uses; a malformed file changes
 // nothing. Authenticated, since it rewrites the whole configuration.
 void handleRestore() {
-  if (!requireAuth()) return;
   StaticJsonDocument<config::JSON_BACKUP_SIZE> doc;
   DeserializationError err = deserializeJson(doc, server.arg("plain"));
   if (err) { json::sendError(server, 400, F("invalid JSON")); return; }
@@ -529,15 +610,15 @@ void handleRestore() {
   }
   if (doc.containsKey("wssid")) {
     String s = doc["wssid"].as<String>();
-    if (s.length() <= config::MAX_SSID_LEN) state::staSsid = s;
+    if (s.length() <= config::SSID_MAX_LENGTH) state::staSsid = s;
   }
   if (doc.containsKey("wpass")) {
     String s = doc["wpass"].as<String>();
-    if (s.length() <= config::MAX_PASS_LEN) state::staPass = s;
+    if (s.length() <= config::PASS_MAX_LENGTH) state::staPass = s;
   }
   if (doc.containsKey("otapass")) {
     String s = doc["otapass"].as<String>();
-    if (s.length() <= config::MAX_PASS_LEN) state::otaPassword = s;
+    if (s.length() <= config::PASS_MAX_LENGTH) state::otaPassword = s;
   }
   if (doc.containsKey("lastmon")) {
     float v = doc["lastmon"];
@@ -568,10 +649,18 @@ void handleRestore() {
 // GET /api/factoryReset — de-energise, erase the whole NVS namespace
 // and reboot; the next boot loads defaults. Authenticated.
 void handleFactoryReset() {
-  if (!requireAuth()) return;
   Serial.println(F("[SYS] FACTORY RESET requested"));
   controller::enterSafeState();        // de-energise before wiping config
   nvs::factoryReset();
+  json::sendOk(server);
+  ota::requestRestart();               // reboot after the response flushes
+}
+
+// GET /api/restart - soft reboot (settings preserved). The response is sent
+// before the deferred restart so the browser sees "ok" and the dashboard can
+// reconnect. Mirrors the OTA/factory-reset reboot path.
+void handleRestart() {
+  Serial.println(F("[SYS] Restart requested"));
   json::sendOk(server);
   ota::requestRestart();               // reboot after the response flushes
 }
@@ -588,35 +677,45 @@ void begin() {
     server.send_P(200, "text/html", ui::DASHBOARD_HTML);
   });
 
-  // Read-only endpoints.
+  // Read-only endpoints (no auth — telemetry only).
   server.on("/api/status",     HTTP_GET, handleStatus);
   server.on("/api/wifiStatus", HTTP_GET, handleWifiStatus);
+  // Scanning lists only SSIDs/rssi — no secrets, no state change — so it
+  // is left unauthenticated. The dashboard shows the scan to anyone who
+  // can reach the unit, exactly like a captive portal. Connecting still
+  // requires the Admin credential.
   server.on("/api/scanWiFi",   HTTP_GET, handleScanWiFi);
   server.on("/api/events",     HTTP_GET, handleEvents);
   server.on("/api/sysinfo",    HTTP_GET, handleSysInfo);
-  server.on("/api/backup",     HTTP_GET, handleBackup);
 
-  // Configuration and control.
-  server.on("/api/setLimits",       HTTP_GET, handleSetLimits);
-  server.on("/api/setEnabled",      HTTP_GET, handleSetEnabled);
-  server.on("/api/switchMeter",     HTTP_GET, handleSwitchMeter);
-  server.on("/api/resetEnergy",     HTTP_GET, handleResetEnergy);
-  server.on("/api/emergency",       HTTP_GET, handleEmergency);
-  server.on("/api/setProtection",   HTTP_GET, handleSetProtection);
-  server.on("/api/clearFault",      HTTP_GET, handleClearFault);
-  server.on("/api/setActiveMeters", HTTP_GET, handleSetActiveMeters);
-  server.on("/api/addMeter",        HTTP_GET, handleAddMeter);
-  server.on("/api/removeMeter",     HTTP_GET, handleRemoveMeter);
-  server.on("/api/setBypass",       HTTP_GET, handleSetBypass);
-  server.on("/api/setWiFi",         HTTP_GET, handleSetWiFi);
-  server.on("/api/setResetDay",     HTTP_GET, handleSetResetDay);
-  server.on("/api/connectWiFi",     HTTP_GET, handleConnectWiFi);
-  server.on("/api/clearEvents",     HTTP_GET, handleClearEvents);
-  server.on("/api/restore",         HTTP_POST, handleRestore);
-  server.on("/api/factoryReset",    HTTP_GET, handleFactoryReset);
-  server.on("/api/testMode",        HTTP_GET, handleTestMode);
-  server.on("/api/testRelay",       HTTP_GET, handleTestRelay);
-  server.on("/api/setTime",         HTTP_GET, handleSetTime);
+  // Authenticated endpoints — every relay-actuating, config-mutating,
+  // or secret-exposing route is wrapped so the auth gate lives in one
+  // auditable place. The dashboard's login modal provides the
+  // credential; unauthenticated curl/scripts get 401.
+  server.on("/api/backup",          HTTP_GET,  authed(handleBackup));
+  server.on("/api/setLimits",       HTTP_GET,  authed(handleSetLimits));
+  server.on("/api/setEnabled",      HTTP_GET,  authed(handleSetEnabled));
+  server.on("/api/switchMeter",     HTTP_GET,  authed(handleSwitchMeter));
+  server.on("/api/resetEnergy",     HTTP_GET,  authed(handleResetEnergy));
+  server.on("/api/emergency",       HTTP_GET,  authed(handleEmergency));
+  server.on("/api/setProtection",   HTTP_GET,  authed(handleSetProtection));
+  server.on("/api/clearFault",      HTTP_GET,  authed(handleClearFault));
+  server.on("/api/setActiveMeters", HTTP_GET,  authed(handleSetActiveMeters));
+  server.on("/api/addMeter",        HTTP_GET,  authed(handleAddMeter));
+  server.on("/api/removeMeter",     HTTP_GET,  authed(handleRemoveMeter));
+  server.on("/api/setBypass",       HTTP_GET,  authed(handleSetBypass));
+  server.on("/api/setWiFi",         HTTP_GET,  authed(handleSetWiFi));
+  server.on("/api/setResetDay",     HTTP_GET,  authed(handleSetResetDay));
+  server.on("/api/connectWiFi",     HTTP_GET,  authed(handleConnectWiFi));
+  server.on("/api/disconnectWiFi",  HTTP_GET,  authed(handleDisconnectWiFi));
+  server.on("/api/forgetWiFi",      HTTP_GET,  authed(handleForgetWiFi));
+  server.on("/api/clearEvents",     HTTP_GET,  authed(handleClearEvents));
+  server.on("/api/restore",         HTTP_POST, authed(handleRestore));
+  server.on("/api/factoryReset",    HTTP_GET,  authed(handleFactoryReset));
+  server.on("/api/restart",         HTTP_GET,  authed(handleRestart));
+  server.on("/api/testMode",        HTTP_GET,  authed(handleTestMode));
+  server.on("/api/testRelay",       HTTP_GET,  authed(handleTestRelay));
+  server.on("/api/setTime",         HTTP_GET,  authed(handleSetTime));
 
   // Browser firmware upload — the first callback sends the final reply
   // once the body has streamed; the second streams the chunks into

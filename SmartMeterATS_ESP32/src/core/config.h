@@ -135,6 +135,20 @@ constexpr float OVER_CURRENT_DEFAULT = 16.0f;
 // protection must not trip on a simply dead line.
 constexpr float LINE_LIVE_VOLTAGE = 10.0f;
 
+// ------------------------------------------------------------
+//  Auto-recovery stability windows (milliseconds)
+//  After an OV/UV/OC trip, the condition must stay CONTINUOUSLY normal
+//  for the fault's window before the trip auto-clears and the load is
+//  restored. A single abnormal sample restarts the window, which is
+//  what prevents relay chatter on an unstable line. Runtime-configurable
+//  and persisted; MIN is an anti-chatter floor.
+// ------------------------------------------------------------
+constexpr unsigned long OV_RECOVERY_MS_DEFAULT = 5000UL;
+constexpr unsigned long UV_RECOVERY_MS_DEFAULT = 5000UL;
+constexpr unsigned long OC_RECOVERY_MS_DEFAULT = 10000UL;
+constexpr unsigned long RECOVERY_MS_MIN        = 1000UL;     // never chatter faster than 1s
+constexpr unsigned long RECOVERY_MS_MAX        = 300000UL;   // 5 min ceiling
+
 constexpr uint8_t RESET_DAY_MIN     = 1;
 constexpr uint8_t RESET_DAY_MAX     = 28;   // valid in every month
 constexpr uint8_t RESET_DAY_DEFAULT = 1;
@@ -145,6 +159,10 @@ constexpr uint8_t RESET_DAY_DEFAULT = 1;
 constexpr float PZEM_RESET_RATIO = 0.9f;
 // Sanity guard against a counter wrap being booked as consumption.
 constexpr float PZEM_MAX_SANE_DELTA_KWH = 100.0f;
+// Consecutive failed Modbus read cycles (each PZEM_READ_INTERVAL) before
+// the PZEM is declared disconnected. A single failed frame is treated as
+// line noise; only a sustained run flips the status to Disconnected.
+constexpr uint8_t PZEM_OFFLINE_FAILURES = 3;
 // Longest outage for which lost energy is still estimated from the
 // last known power; beyond this the estimate is meaningless.
 constexpr float PZEM_MAX_ESTIMATE_HOURS = 24.0f;
@@ -166,12 +184,22 @@ constexpr const char* DEFAULT_OTA_PASSWORD = "smartats123";
 // the OTA password (NVS "otapass"), so there is one device secret.
 constexpr const char* AUTH_USER = "admin";
 
+// Read-only "Viewer" role. Accepted on telemetry endpoints, refused on
+// every mutating route. Distinct from the admin device secret so it can
+// be shared without granting control. Password is a fixed build-time
+// constant (no control capability, so it is not stored in NVS).
+constexpr const char* AUTH_VIEWER_USER = "viewer";
+constexpr const char* VIEWER_PASSWORD  = "viewer123";
+
 extern const IPAddress AP_IP;
 extern const IPAddress AP_SUBNET;
 
 constexpr unsigned long STA_CONNECT_TIMEOUT_MS = 30000UL;
-constexpr uint8_t  MAX_SSID_LEN = 32;
-constexpr uint8_t  MAX_PASS_LEN = 64;
+// Named SSID_MAX_LENGTH/PASS_MAX_LENGTH (not MAX_SSID_LEN) because the
+// ESP32 core >= 3.3 defines MAX_SSID_LEN as a macro in
+// esp_wifi_types_generic.h, which would replace the constexpr identifier.
+constexpr uint8_t  SSID_MAX_LENGTH = 32;
+constexpr uint8_t  PASS_MAX_LENGTH = 64;
 constexpr uint8_t  MAX_SCAN_RESULTS = 20;
 constexpr uint16_t HTTP_PORT = 80;
 
@@ -187,7 +215,7 @@ enum WifiMode : uint8_t {
 constexpr size_t JSON_STATUS_SIZE      = 4096;
 constexpr size_t JSON_SYSINFO_SIZE     = 768;
 constexpr size_t JSON_BACKUP_SIZE      = 1536;
-constexpr size_t JSON_WIFI_STATUS_SIZE = 256;
+constexpr size_t JSON_WIFI_STATUS_SIZE = 512;
 
 // Config backup schema version, for future migration.
 constexpr uint8_t BACKUP_SCHEMA_VERSION = 1;
