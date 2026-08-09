@@ -73,9 +73,11 @@ Result requestClearFault() {
 
   STATE_LOCK();
   if (state::protTrip) {
-    state::protTrip   = false;
-    state::protReason = "";
-    cleared           = true;
+    state::protTrip       = false;
+    state::protReason     = "";
+    state::protRecovering = false;               // drop any in-flight auto-recovery
+    state::protFaultType  = state::PROT_FAULT_NONE;
+    cleared               = true;
     if (!state::emergencyOff) relay::switchToMeter(state::activeMeter);
   }
   STATE_UNLOCK();

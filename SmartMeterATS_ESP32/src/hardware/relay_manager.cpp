@@ -31,9 +31,11 @@ void allRelaysOff() {
 }
 
 void switchToMeter(int meterIndex) {
-  STATE_LOCK();
+  // Caller holds the state lock (see relay_manager.h). This function
+  // must NOT take it again: it re-enters allRelaysOff() below, which
+  // also assumes the lock is held, and re-acquiring a non-recursive
+  // state mutex here would deadlock the caller.
   if (meterIndex < 0 || meterIndex >= state::activeMeterCount) {
-    STATE_UNLOCK();
     return;
   }
   if (!state::meters[meterIndex].enabled) {
@@ -47,7 +49,6 @@ void switchToMeter(int meterIndex) {
   state::activeMeter   = meterIndex;
   state::pendingMeter  = meterIndex;
   state::switchOffTime = millis();
-  STATE_UNLOCK();
 
   Serial.printf("[RELAY] Switch to Meter %d scheduled (+%lums)\n",
                 meterIndex + 1, config::RELAY_SWITCH_DELAY);

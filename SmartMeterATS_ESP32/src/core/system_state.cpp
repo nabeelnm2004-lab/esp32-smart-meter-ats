@@ -48,6 +48,15 @@ float  ocCurrThresh = config::OVER_CURRENT_DEFAULT;
 bool   protTrip     = false;
 String protReason   = "";
 
+uint8_t       protFaultType      = PROT_FAULT_NONE;
+bool          protRecovering     = false;
+unsigned long protRecoverStartMs = 0;
+uint32_t      lastFaultEpoch     = 0;
+
+unsigned long ovRecoveryMs = config::OV_RECOVERY_MS_DEFAULT;
+unsigned long uvRecoveryMs = config::UV_RECOVERY_MS_DEFAULT;
+unsigned long ocRecoveryMs = config::OC_RECOVERY_MS_DEFAULT;
+
 bool     rtcOK             = false;
 bool     rtcLostPower      = false;
 uint32_t bootEpoch         = 0;

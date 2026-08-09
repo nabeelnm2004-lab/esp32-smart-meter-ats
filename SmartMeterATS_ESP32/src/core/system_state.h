@@ -126,6 +126,26 @@ extern float  ocCurrThresh;
 extern bool   protTrip;      // latched until cleared from the dashboard
 extern String protReason;    // human-readable trip cause
 
+// Auto-recovery for OV/UV/OC. protTrip stays the single "block
+// energization" gate; these only drive the automatic clear of it.
+// Emergency/OTA/factory-reset never touch protTrip, so they can never
+// auto-recover through this path.
+enum ProtFaultType : uint8_t {
+  PROT_FAULT_NONE = 0,
+  PROT_FAULT_OV   = 1,
+  PROT_FAULT_UV   = 2,
+  PROT_FAULT_OC   = 3,
+};
+extern uint8_t       protFaultType;       // which condition tripped (selects delay + name)
+extern bool          protRecovering;      // true while the stability window is running
+extern unsigned long protRecoverStartMs;  // millis() when the window began
+extern uint32_t      lastFaultEpoch;      // bootEpoch-based time of the last trip (0 = none)
+
+// Configurable, NVS-persisted stability windows (ms). Defaults in config.h.
+extern unsigned long ovRecoveryMs;
+extern unsigned long uvRecoveryMs;
+extern unsigned long ocRecoveryMs;
+
 // ------------------------------------------------------------
 //  Time
 //  bootEpoch lets the event log timestamp entries without touching

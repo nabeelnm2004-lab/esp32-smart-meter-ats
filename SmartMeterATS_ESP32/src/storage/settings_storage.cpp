@@ -31,6 +31,9 @@ struct SettingsShadow {
   float    ov;
   float    uv;
   float    oc;
+  uint32_t ovrec;
+  uint32_t uvrec;
+  uint32_t ocrec;
   bool     emerg;
   bool     bypass;
   uint8_t  lmon;
@@ -85,6 +88,7 @@ void save() {
   float    dailySnap[config::DAILY_HISTORY_DAYS];
   uint8_t  countSnap, activeSnap, didxSnap;
   float    todaySnap, curmonSnap, lastmonSnap, ovSnap, uvSnap, ocSnap;
+  uint32_t ovrecSnap, uvrecSnap, ocrecSnap;
   bool     emergSnap, bypassSnap;
   uint8_t  rstmonSnap, rdaySnap, wmodeSnap;
   uint16_t rstyrSnap;
@@ -105,6 +109,9 @@ void save() {
   ovSnap      = state::ovVoltThresh;
   uvSnap      = state::uvVoltThresh;
   ocSnap      = state::ocCurrThresh;
+  ovrecSnap   = state::ovRecoveryMs;
+  uvrecSnap   = state::uvRecoveryMs;
+  ocrecSnap   = state::ocRecoveryMs;
   emergSnap   = state::emergencyOff;
   bypassSnap  = state::bypassMode;
   rstmonSnap  = (uint8_t)max(state::lastResetMonth, 0);
@@ -134,6 +141,8 @@ void save() {
         shadow.lastmon!= lastmonSnap ||
         shadow.ov     != ovSnap      || shadow.uv      != uvSnap      ||
         shadow.oc     != ocSnap      ||
+        shadow.ovrec  != ovrecSnap   || shadow.uvrec   != uvrecSnap   ||
+        shadow.ocrec  != ocrecSnap   ||
         shadow.emerg  != emergSnap   || shadow.bypass  != bypassSnap  ||
         shadow.lmon   != rstmonSnap  || shadow.lyear   != rstyrSnap   ||
         shadow.rday   != rdaySnap    || shadow.wmode   != wmodeSnap   ||
@@ -151,7 +160,14 @@ void save() {
     }
   }
 
-  prefs.begin(config::NVS_NAMESPACE, false);   // read-write
+  if (!prefs.begin(config::NVS_NAMESPACE, false)) {   // read-write
+    // NVS open failed (partition full/corrupt). Keep the data dirty so the
+    // next flush retries, and do NOT touch the shadow or lastWrite — marking
+    // unwritten values as persisted would drop them permanently.
+    dirty = true;
+    Serial.println(F("[NVS] ERROR: open failed — save deferred"));
+    return;
+  }
   char key[8];
   if (force || shadow.mcount != countSnap) prefs.putUChar("mcount", countSnap);
   for (int i = 0; i < config::MAX_METERS; i++) {
@@ -175,6 +191,9 @@ void save() {
   if (force || shadow.ov      != ovSnap)      prefs.putFloat("ov",      ovSnap);
   if (force || shadow.uv      != uvSnap)      prefs.putFloat("uv",      uvSnap);
   if (force || shadow.oc      != ocSnap)      prefs.putFloat("oc",      ocSnap);
+  if (force || shadow.ovrec   != ovrecSnap)   prefs.putUInt("ovrec",    ovrecSnap);
+  if (force || shadow.uvrec   != uvrecSnap)   prefs.putUInt("uvrec",    uvrecSnap);
+  if (force || shadow.ocrec   != ocrecSnap)   prefs.putUInt("ocrec",    ocrecSnap);
   if (force || shadow.emerg   != emergSnap)   prefs.putBool("emerg",    emergSnap);
   if (force || shadow.bypass  != bypassSnap)  prefs.putBool("bypass",   bypassSnap);
   if (force || shadow.lmon    != rstmonSnap)  prefs.putUChar("lmon",    rstmonSnap);
@@ -197,6 +216,7 @@ void save() {
   shadow.today   = todaySnap;   shadow.curmon = curmonSnap;
   shadow.lastmon = lastmonSnap;
   shadow.ov      = ovSnap;      shadow.uv     = uvSnap;      shadow.oc   = ocSnap;
+  shadow.ovrec   = ovrecSnap;   shadow.uvrec  = uvrecSnap;   shadow.ocrec = ocrecSnap;
   shadow.emerg   = emergSnap;   shadow.bypass = bypassSnap;
   shadow.lmon    = rstmonSnap;  shadow.lyear  = rstyrSnap;   shadow.rday = rdaySnap;
   shadow.wmode   = wmodeSnap;
@@ -224,6 +244,9 @@ void seedShadow() {
   shadow.ov      = state::ovVoltThresh;
   shadow.uv      = state::uvVoltThresh;
   shadow.oc      = state::ocCurrThresh;
+  shadow.ovrec   = state::ovRecoveryMs;
+  shadow.uvrec   = state::uvRecoveryMs;
+  shadow.ocrec   = state::ocRecoveryMs;
   shadow.emerg   = state::emergencyOff;
   shadow.bypass  = state::bypassMode;
   shadow.lmon    = (uint8_t)max(state::lastResetMonth, 0);
@@ -260,7 +283,9 @@ void load() {
   for (int i = 0; i < config::MAX_METERS; i++) {
     snprintf(key, sizeof(key), "lim%d", i);
     state::meters[i].energyLimit = prefs.getFloat(key, config::ENERGY_LIMIT_DEFAULT);
-    if (isnan(state::meters[i].energyLimit) || state::meters[i].energyLimit <= 0) {
+    // isfinite() rejects NaN AND +/-Inf; a corrupt +Inf would pass a plain
+    // "> 0" test and be applied as a limit.
+    if (!isfinite(state::meters[i].energyLimit) || state::meters[i].energyLimit <= 0) {
       state::meters[i].energyLimit = config::ENERGY_LIMIT_DEFAULT;
     }
     snprintf(key, sizeof(key), "en%d", i);
@@ -275,7 +300,7 @@ void load() {
     for (int i = 0; i < config::DAILY_HISTORY_DAYS; i++) state::dailyUsage[i] = 0.0f;
   } else {
     for (int i = 0; i < config::DAILY_HISTORY_DAYS; i++) {
-      if (isnan(state::dailyUsage[i]) || state::dailyUsage[i] < 0) {
+      if (!isfinite(state::dailyUsage[i]) || state::dailyUsage[i] < 0) {
         state::dailyUsage[i] = 0.0f;
       }
     }
@@ -286,9 +311,9 @@ void load() {
   state::todayUsed        = prefs.getFloat("today",   0.0f);
   state::currentMonthUsed = prefs.getFloat("curmon",  0.0f);
   state::lastMonthUsed    = prefs.getFloat("lastmon", 0.0f);
-  if (isnan(state::todayUsed)        || state::todayUsed < 0)        state::todayUsed = 0.0f;
-  if (isnan(state::currentMonthUsed) || state::currentMonthUsed < 0) state::currentMonthUsed = 0.0f;
-  if (isnan(state::lastMonthUsed)    || state::lastMonthUsed < 0)    state::lastMonthUsed = 0.0f;
+  if (!isfinite(state::todayUsed)        || state::todayUsed < 0)        state::todayUsed = 0.0f;
+  if (!isfinite(state::currentMonthUsed) || state::currentMonthUsed < 0) state::currentMonthUsed = 0.0f;
+  if (!isfinite(state::lastMonthUsed)    || state::lastMonthUsed < 0)    state::lastMonthUsed = 0.0f;
 
   state::ovVoltThresh = prefs.getFloat("ov", config::OVER_VOLTAGE_DEFAULT);
   state::uvVoltThresh = prefs.getFloat("uv", config::UNDER_VOLTAGE_DEFAULT);
@@ -308,6 +333,18 @@ void load() {
       state::ocCurrThresh > config::OVER_CURRENT_MAX) {
     state::ocCurrThresh = config::OVER_CURRENT_DEFAULT;
   }
+
+  // Recovery stability windows (ms). Missing keys on an existing install fall
+  // back to the defaults, then clamp to the anti-chatter range.
+  state::ovRecoveryMs = prefs.getUInt("ovrec", config::OV_RECOVERY_MS_DEFAULT);
+  state::uvRecoveryMs = prefs.getUInt("uvrec", config::UV_RECOVERY_MS_DEFAULT);
+  state::ocRecoveryMs = prefs.getUInt("ocrec", config::OC_RECOVERY_MS_DEFAULT);
+  state::ovRecoveryMs = constrain(state::ovRecoveryMs,
+                                  config::RECOVERY_MS_MIN, config::RECOVERY_MS_MAX);
+  state::uvRecoveryMs = constrain(state::uvRecoveryMs,
+                                  config::RECOVERY_MS_MIN, config::RECOVERY_MS_MAX);
+  state::ocRecoveryMs = constrain(state::ocRecoveryMs,
+                                  config::RECOVERY_MS_MIN, config::RECOVERY_MS_MAX);
 
   state::emergencyOff = prefs.getBool("emerg",  false);
   state::bypassMode   = prefs.getBool("bypass", false);
@@ -333,11 +370,11 @@ void load() {
   }
   state::staSsid = prefs.getString("wssid", "");
   state::staPass = prefs.getString("wpass", "");
-  if (state::staSsid.length() > config::MAX_SSID_LEN) {
-    state::staSsid = state::staSsid.substring(0, config::MAX_SSID_LEN);
+  if (state::staSsid.length() > config::SSID_MAX_LENGTH) {
+    state::staSsid = state::staSsid.substring(0, config::SSID_MAX_LENGTH);
   }
-  if (state::staPass.length() > config::MAX_PASS_LEN) {
-    state::staPass = state::staPass.substring(0, config::MAX_PASS_LEN);
+  if (state::staPass.length() > config::PASS_MAX_LENGTH) {
+    state::staPass = state::staPass.substring(0, config::PASS_MAX_LENGTH);
   }
   if (state::staSsid.length() == 0 && state::wifiMode != config::WIFI_MODE_AP_ONLY) {
     state::wifiMode = config::WIFI_MODE_AP_ONLY;   // STA modes need credentials
@@ -349,6 +386,13 @@ void load() {
   }
   prefs.end();
 
+  // NVS and RAM now agree, so prime the shadow: without this the first save()
+  // after boot sees shadow.valid==false and force-rewrites every key even
+  // though flash already holds identical values (needless wear). If load()
+  // clamped a corrupt value, the shadow holds the clamped one and the first
+  // real change self-heals it on the next write.
+  seedShadow();
+
   Serial.println(F("[NVS] Settings loaded"));
   if (state::emergencyOff) {
     Serial.println(F("[BOOT] Emergency state restored — all relays OFF"));
@@ -356,7 +400,10 @@ void load() {
 }
 
 void factoryReset() {
-  prefs.begin(config::NVS_NAMESPACE, false);
+  if (!prefs.begin(config::NVS_NAMESPACE, false)) {
+    Serial.println(F("[NVS] ERROR: factory reset failed — open error"));
+    return;
+  }
   prefs.clear();
   prefs.end();
   shadow.valid = false;   // next save must write everything
