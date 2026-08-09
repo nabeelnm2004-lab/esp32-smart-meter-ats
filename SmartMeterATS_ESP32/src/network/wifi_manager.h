@@ -63,6 +63,22 @@ bool connectNow(uint8_t mode, const String& ssid, const String& pass,
 // docs/api_rules.md. Blocking: a scan takes a couple of seconds.
 String scanNetworksJson();
 
+// True while the station attempt has given up and the radio is running
+// AP only (fell back after the connect timeout). Distinct from "never
+// asked to connect" so the dashboard can show Reconnecting/AP-only.
+bool inApFallback();
+
+// Drop the current station link but keep the access point up so the
+// dashboard stays reachable. Saved credentials and mode are untouched;
+// connectNow()/applyConfiguration() restore the station later.
+void disconnectStation();
+
+// Erase the saved station credentials from NVS and drop to AP only so
+// the dashboard stays reachable. Mode is reset to AP_ONLY (a station
+// mode without credentials is meaningless); the AP fallback always stays
+// enabled by design.
+void forgetNetwork();
+
 }  // namespace wifi
 }  // namespace network
 

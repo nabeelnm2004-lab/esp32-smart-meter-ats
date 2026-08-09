@@ -25,11 +25,29 @@ bool          staGaveUp       = false;   // fell back to AP after the timeout
 unsigned long staConnectStart = 0;
 String        staError;                  // last failure reason, for the dashboard
 
+// Latched by disconnectStation() so the poll loop stays off the radio
+// until the user explicitly reconnects or applies a new configuration.
+// The AP is unaffected — the dashboard stays reachable the whole time.
+bool          userDisconnected = false;
+
 bool          applyPending = false;      // deferred radio reconfigure
 unsigned long applyAtMs    = 0;
 
 bool     ntpConfigured = false;
 uint32_t ntpSyncEpoch  = 0;
+
+// After an AP fallback, retry the configured STA network on this cadence so a
+// transient outage at boot doesn't strand the device in AP mode until reboot.
+const unsigned long STA_RETRY_INTERVAL_MS = 60000;   // 1 min
+
+// WPA2-personal minimum passphrase length. A non-empty password shorter than
+// this can never associate, so it's rejected up front instead of being saved
+// as a permanent silent connect failure. (Empty == open network, allowed.)
+const uint8_t WPA_MIN_PASS_LEN = 8;
+
+// The ESP32 core has no WiFi.disconnectReason(), so the last disconnect is
+// captured from the WIFI_EVENT_STA_DISCONNECTED event and classified here.
+wifi_err_reason_t lastDisconnectReason = WIFI_REASON_UNSPECIFIED;
 
 void startAccessPoint() {
   WiFi.softAPConfig(config::AP_IP, config::AP_IP, config::AP_SUBNET);
@@ -83,6 +101,7 @@ void handleNtpSync() {
 void startRadio() {
   staConnected = false;
   staGaveUp    = false;
+  lastDisconnectReason = WIFI_REASON_UNSPECIFIED;
 
   if (state::wifiMode == config::WIFI_MODE_AP_ONLY || state::staSsid.length() == 0) {
     WiFi.mode(WIFI_AP);
@@ -111,10 +130,17 @@ bool validateCredentials(uint8_t mode, String& ssid, String& pass, String& reaso
     reason = F("mode must be 0-2");
     return false;
   }
-  if (ssid.length() > config::MAX_SSID_LEN) ssid = ssid.substring(0, config::MAX_SSID_LEN);
-  if (pass.length() > config::MAX_PASS_LEN) pass = pass.substring(0, config::MAX_PASS_LEN);
+  if (ssid.length() > config::SSID_MAX_LENGTH) ssid = ssid.substring(0, config::SSID_MAX_LENGTH);
+  if (pass.length() > config::PASS_MAX_LENGTH) pass = pass.substring(0, config::PASS_MAX_LENGTH);
   if (mode != config::WIFI_MODE_AP_ONLY && ssid.length() == 0) {
     reason = F("ssid required for station modes");
+    return false;
+  }
+  // WPA2-personal requires >=8 characters. A shorter non-empty password can
+  // never associate and produces a silent permanent connect failure. Empty
+  // password == open network, allowed.
+  if (pass.length() > 0 && pass.length() < WPA_MIN_PASS_LEN) {
+    reason = F("password must be 8+ characters or empty");
     return false;
   }
   return true;
@@ -135,6 +161,12 @@ void onLinkEstablished() {
   restartMdns();
 }
 
+// Records the reason code from the STA disconnect event. Called from the WiFi
+// event task; it only writes a scalar, so it is safe to keep this light.
+void onStaDisconnected(const arduino_event_info_t& info) {
+  lastDisconnectReason = (wifi_err_reason_t)info.wifi_sta_disconnected.reason;
+}
+
 void onLinkLost() {
   staConnected  = false;
   ntpConfigured = false;   // re-register NTP on the next link
@@ -150,10 +182,34 @@ void onLinkLost() {
   staConnectStart = millis();
 }
 
+unsigned long staGaveUpAt = 0;   // millis() of the last AP fallback
+
+// Map the WiFi status/reason codes to a human-readable reason the
+// dashboard can show verbatim. The ESP32 core collapses both a wrong
+// password and a generic failure into WL_CONNECT_FAILED, so the finer
+// detail comes from the last captured STA disconnect event reason.
+void classifyConnectError() {
+  const wifi_err_reason_t reason = lastDisconnectReason;
+  if (reason == WIFI_REASON_AUTH_FAIL ||
+      reason == WIFI_REASON_AUTH_EXPIRE ||
+      reason == WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT ||
+      reason == WIFI_REASON_802_1X_AUTH_FAILED) {
+    staError = F("Incorrect password");
+  } else if (reason == WIFI_REASON_NO_AP_FOUND ||
+             WiFi.status() == WL_NO_SSID_AVAIL) {
+    staError = F("Network not found");
+  } else if (reason != WIFI_REASON_UNSPECIFIED &&
+             reason != WIFI_REASON_AUTH_LEAVE) {
+    staError = F("Connection failed");
+  } else {
+    staError = F("Connection timeout");
+  }
+}
+
 void onConnectTimeout() {
-  staGaveUp = true;
-  staError  = (WiFi.status() == WL_NO_SSID_AVAIL) ? F("Network not found")
-                                                  : F("Connection timeout");
+  staGaveUp   = true;
+  staGaveUpAt = millis();
+  classifyConnectError();
   Serial.printf("[WiFi] STA connect to \"%s\" failed after %lus — falling back to AP\n",
                 state::staSsid.c_str(), config::STA_CONNECT_TIMEOUT_MS / 1000);
   // Runtime fallback only: NVS keeps the configured mode so the next
@@ -169,6 +225,10 @@ void onConnectTimeout() {
 }  // namespace
 
 void begin() {
+  WiFi.onEvent([](arduino_event_id_t event, arduino_event_info_t info) {
+      onStaDisconnected(info);
+    },
+    ARDUINO_EVENT_WIFI_STA_DISCONNECTED);
   startRadio();
 }
 
@@ -183,8 +243,26 @@ void handleStation() {
 
   handleNtpSync();
 
-  if (state::wifiMode == config::WIFI_MODE_AP_ONLY || staGaveUp ||
+  if (userDisconnected) return;   // user chose to stay off until reconnecting
+
+  if (state::wifiMode == config::WIFI_MODE_AP_ONLY ||
       state::staSsid.length() == 0) {
+    return;
+  }
+
+  // After an AP fallback, periodically re-attempt the configured STA network:
+  // a transient outage at boot must not strand the device in AP mode until a
+  // manual reboot. Clearing staGaveUp lets the poll loop below drive a fresh
+  // connect attempt (and a new timeout if it fails again).
+  if (staGaveUp) {
+    if ((millis() - staGaveUpAt) < STA_RETRY_INTERVAL_MS) return;
+    Serial.println(F("[WiFi] Retrying configured STA network after AP fallback"));
+    staGaveUp = false;
+    lastDisconnectReason = WIFI_REASON_UNSPECIFIED;
+    WiFi.mode(WIFI_AP_STA);
+    startAccessPoint();          // keep the dashboard reachable during retry
+    WiFi.begin(state::staSsid.c_str(), state::staPass.c_str());
+    staConnectStart = millis();
     return;
   }
 
@@ -222,6 +300,7 @@ bool applyConfiguration(uint8_t mode, const String& ssid, const String& pass,
   state::wifiMode = mode;
   state::staSsid  = workingSsid;
   state::staPass  = workingPass;
+  userDisconnected = false;   // an explicit connect overrides a manual disconnect
   nvs::forceSave();          // connectivity config must survive a reboot
 
   applyPending = true;       // radio reconfigures after the response flushes
@@ -252,6 +331,9 @@ bool connectNow(uint8_t mode, const String& ssid, const String& pass,
   staConnected    = false;
   staGaveUp       = false;
   staError        = "";
+  lastDisconnectReason = WIFI_REASON_UNSPECIFIED;
+  userDisconnected = false;   // an explicit connect overrides a manual disconnect
+  applyPending    = false;   // cancel any deferred applyConfiguration() reconfigure
 
   WiFi.disconnect(true, false);   // drop the old link, keep the AP config
   WiFi.mode(WIFI_AP_STA);
@@ -264,6 +346,41 @@ bool connectNow(uint8_t mode, const String& ssid, const String& pass,
                 workingSsid.c_str(), mode);
   core::eventlog::add("WiFi connect: %s", workingSsid.c_str());
   return true;
+}
+
+bool inApFallback() { return staGaveUp; }
+
+void disconnectStation() {
+  userDisconnected = true;
+  staConnected = false;
+  staGaveUp    = false;
+  staError     = "";
+  WiFi.disconnect(true);   // drop the link, keep saved credentials in NVS
+  if (state::wifiMode == config::WIFI_MODE_STA_ONLY) {
+    // Bring the AP back so the dashboard stays reachable.
+    WiFi.mode(WIFI_AP_STA);
+    startAccessPoint();
+  }
+  restartMdns();
+  Serial.println(F("[WiFi] Station disconnected by user — AP still up"));
+  core::eventlog::add("WiFi disconnected by user");
+}
+
+void forgetNetwork() {
+  userDisconnected = true;
+  staConnected = false;
+  staGaveUp    = false;
+  staError     = "";
+  state::staSsid = "";
+  state::staPass = "";
+  state::wifiMode = config::WIFI_MODE_AP_ONLY;   // station modes need an SSID
+  nvs::forceSave();                              // credentials must not survive
+  WiFi.disconnect(true);
+  WiFi.mode(WIFI_AP);
+  startAccessPoint();
+  restartMdns();
+  Serial.println(F("[WiFi] Saved network forgotten — AP only mode"));
+  core::eventlog::add("WiFi network forgotten");
 }
 
 String scanNetworksJson() {
