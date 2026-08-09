@@ -21,6 +21,13 @@ namespace {
 
 bool ready = false;
 
+// Last time the ArduinoOTA push made progress (start or a data chunk). If a
+// push stalls (network drop mid-transfer) ArduinoOTA may not fire onError
+// promptly, leaving the device in safe-state (relays tripped, sampling
+// paused) forever. The watchdog in handle() unwinds after this idle window.
+unsigned long otaProgressMs      = 0;
+const unsigned long OTA_STALL_TIMEOUT_MS = 60000;   // 60s with no progress
+
 void enterUpdateState() {
   state::otaInProgress = true;
   core::sampling::pause();          // no Modbus/mutex traffic while flashing
@@ -37,12 +44,14 @@ void abortUpdateState() {
 
 void onOtaStart() {
   enterUpdateState();
+  otaProgressMs = millis();
   Serial.printf("[OTA] Update started (%s)\n",
                 ArduinoOTA.getCommand() == U_FLASH ? "firmware" : "filesystem");
 }
 
 void onOtaProgress(unsigned int progress, unsigned int total) {
   esp_task_wdt_reset();             // uploads can exceed the WDT window
+  otaProgressMs = millis();         // feed the stall watchdog
   static unsigned int lastPct = 101;
   const unsigned int pct = total ? (progress * 100) / total : 0;
   if (pct != lastPct && pct % 10 == 0) {
@@ -86,6 +95,20 @@ void begin() {
 
 void handle() {
   if (ready) ArduinoOTA.handle();
+
+  // Stall watchdog: only the ArduinoOTA path uses otaInProgress via
+  // onOtaStart. If a push stalls and onError never fires, unwind after the
+  // idle window so the device leaves safe-state and resumes normal operation.
+  // (The web-upload path is driven synchronously by the HTTP handler and does
+  //  not rely on this timer.)
+  if (state::otaInProgress && otaProgressMs != 0 &&
+      (millis() - otaProgressMs) > OTA_STALL_TIMEOUT_MS) {
+    Serial.println(F("[OTA] Push stalled — aborting and restoring operation"));
+    core::eventlog::add("OTA aborted: stalled");
+    Update.abort();
+    abortUpdateState();
+    otaProgressMs = 0;
+  }
 }
 
 bool isUpdating() { return state::otaInProgress; }
@@ -110,25 +133,48 @@ void handleFirmwareUpload(WebServer& server) {
     Serial.printf("[OTA] Web upload start: %s\n", up.filename.c_str());
     core::eventlog::add("OTA upload started");
     enterUpdateState();
+    otaProgressMs = millis();        // arm the handle() stall watchdog for
+                                     // this path too: a half-open client
+                                     // socket may stop delivering chunks
+                                     // without ever firing UPLOAD_FILE_ABORTED.
     if (!Update.begin(UPDATE_SIZE_UNKNOWN)) {
       Serial.printf("[OTA] begin failed: %s\n", Update.errorString());
     }
   } else if (up.status == UPLOAD_FILE_WRITE) {
     // The ESP32 image magic byte on the very first chunk rejects
-    // non-firmware files before wasting flash cycles.
+    // non-firmware files before wasting flash cycles. On rejection, abort
+    // AND unwind immediately so the device leaves safe-state now instead of
+    // staying tripped for the rest of a doomed upload.
     if (up.totalSize == 0 && up.currentSize > 0 && up.buf[0] != 0xE9) {
       Update.abort();
+      abortUpdateState();
+      core::eventlog::add("OTA rejected: not a firmware image");
       Serial.println(F("[OTA] Rejected: not an ESP32 firmware image"));
+      return;
     }
     if (!Update.hasError() &&
         Update.write(up.buf, up.currentSize) != up.currentSize) {
+      // A short write means the stream is broken; abort and recover now
+      // rather than streaming the rest into a dead Update object.
       Serial.printf("[OTA] write failed: %s\n", Update.errorString());
+      Update.abort();
+      abortUpdateState();
+      core::eventlog::add("OTA failed: write error");
+      return;
     }
     esp_task_wdt_reset();           // large uploads exceed the WDT window
+    otaProgressMs = millis();       // feed the stall watchdog on each chunk
   } else if (up.status == UPLOAD_FILE_END) {
-    Update.end(true);               // final validation of the whole image
+    // Final validation of the whole image. If end() fails, recover here so
+    // finishFirmwareUpload() sees the error and never reboots.
+    if (!Update.end(true)) {
+      Serial.printf("[OTA] end failed: %s\n", Update.errorString());
+      core::eventlog::add("OTA failed: %s", Update.errorString());
+      abortUpdateState();
+    }
   } else if (up.status == UPLOAD_FILE_ABORTED) {
     Update.abort();
+    abortUpdateState();             // client bailed — restore normal operation
     Serial.println(F("[OTA] Upload aborted by client"));
   }
 }
@@ -139,6 +185,15 @@ void finishFirmwareUpload(WebServer& server) {
   if (!server.authenticate(config::AUTH_USER, state::otaPassword.c_str())) {
     Update.abort();
     utilities::json::sendError(server, 401, F("auth required"));
+    return;
+  }
+  // Guard against a partial/absent upload: if Update was never started, never
+  // wrote successfully, or didn't reach UPLOAD_FILE_END, isFinished() is false
+  // and a reboot would restart into a half-flashed or empty partition (brick).
+  if (!Update.isFinished()) {
+    utilities::json::sendError(server, 400, F("upload incomplete or never started"));
+    core::eventlog::add("OTA rejected: incomplete upload");
+    abortUpdateState();
     return;
   }
   if (Update.hasError()) {
