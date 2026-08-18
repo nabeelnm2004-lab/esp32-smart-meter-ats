@@ -109,9 +109,20 @@ Bundled with the ESP32 Arduino core: WiFi, WebServer, Preferences, Wire.
 3. Select the correct COM port.
 4. Upload `SmartMeterATS_ESP32/SmartMeterATS_ESP32.ino`.
 
+## SmartATS Mobile App (Android APK)
+
+A ready-to-install Android APK is provided alongside the firmware:
+
+- APK: `smartats_mobile/build/app/outputs/flutter-apk/app-release.apk`
+- Source: `smartats_mobile/` (Flutter)
+- Install by copying the APK to an Android phone and enabling "Install unknown apps".
+
+The app connects to the same REST API — in AP mode it uses `http://192.168.4.1`, in station mode you enter the ESP32's local IP inside the app.
+
 ## Project Files
 
 - `SmartMeterATS_ESP32/SmartMeterATS_ESP32.ino` — universal ESP32 firmware
+- `smartats_mobile/` — SmartATS Mobile Flutter app source + pre-built release APK
 - `PROJECT_GUIDE.txt` — legacy ESP8266 wiring/implementation guide (kept for reference)
 
 ## Safety Note

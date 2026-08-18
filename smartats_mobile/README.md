@@ -9,10 +9,17 @@ This is the production-ready Flutter app codebase for **SmartATS Mobile**, match
 4. **Wi-Fi & Provisioning Screen**: Station/AP status, live 2.4GHz network scanner with RSSI meters, and one-tap network provisioning.
 5. **System & Health Screen**: ESP32 chip specs, free heap, uptime, and DS3231 RTC synchronization.
 
+## 📦 Pre-built APK
+
+A release APK is included in the repo at:
+`smartats_mobile/build/app/outputs/flutter-apk/app-release.apk`
+
+Copy it to your Android phone and install it (enable "Install unknown apps" on Android 8+).
+
 ## 🚀 Quick Start (Building APK)
 
 1. Make sure Flutter 3.x is installed on your machine.
-2. Open terminal in the `flutter_smart_ats` directory:
+2. Open terminal in the `smartats_mobile` directory:
 ```bash
 flutter pub get
 flutter run
