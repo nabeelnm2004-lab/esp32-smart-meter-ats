@@ -65,7 +65,9 @@ uint32_t lastTimeSyncEpoch = 0;
 uint8_t wifiMode    = config::WIFI_MODE_AP_ONLY;
 String  staSsid     = "";
 String  staPass     = "";
+String  apPassword  = config::AP_PASSWORD;
 String  otaPassword = config::DEFAULT_OTA_PASSWORD;
+String  viewerPassword = config::VIEWER_PASSWORD;
 
 bool          restartPending = false;
 unsigned long restartAtMs    = 0;

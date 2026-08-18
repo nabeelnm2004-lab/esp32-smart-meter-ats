@@ -28,11 +28,10 @@ struct Result {
   String msg;   // empty on success
 };
 
-// Manual switch to meterIndex. Rejected while test mode or a
-// protection trip is active, when the meter is disabled or out of
-// range, or when it already reached its energy limit (unless bypass
-// mode is on). Success clears the emergency latch and re-bases the
-// per-meter energy baseline.
+// Manual switch to meterIndex. Rejected while test mode, an emergency
+// latch, or a protection trip is active, when the meter is disabled or
+// out of range, or when it already reached its energy limit (unless
+// bypass mode is on). Re-bases the per-meter energy baseline on success.
 Result requestSwitch(int meterIndex);
 
 // Latch emergency OFF and cut every relay. Always succeeds; persisted
@@ -43,6 +42,14 @@ Result requestEmergencyOff(const char* source);
 // Clear a latched protection trip and restore the active meter unless
 // the emergency latch is still set. Persisted immediately.
 Result requestClearFault();
+
+// Explicitly clear the Emergency OFF latch and restore the active meter.
+// Rejected if a protection trip is still active — the operator must
+// clear the fault first. Idempotent when emergencyOff is already false.
+// If bypassMode is also active the relay is restored but auto-switching
+// remains suspended; the dashboard notifies the operator accordingly.
+// Persisted immediately.
+Result requestClearEmergency();
 
 // Zero every per-meter energy counter and re-base the PZEM baseline.
 Result requestResetEnergy();

@@ -33,6 +33,14 @@ bool          userDisconnected = false;
 bool          applyPending = false;      // deferred radio reconfigure
 unsigned long applyAtMs    = 0;
 
+// Station Only: the SoftAP is not torn down the instant the station link is
+// proven. It stays up while a browser is still connected to it so the
+// dashboard can be handed off to the router address (mDNS / STA IP) first;
+// the AP is retired later, once idle. Set when the link establishes and
+// evaluated from handleStation().
+bool          staOnlyApTeardown   = false;
+unsigned long staOnlyApTeardownAt = 0;
+
 bool     ntpConfigured = false;
 uint32_t ntpSyncEpoch  = 0;
 
@@ -51,7 +59,7 @@ wifi_err_reason_t lastDisconnectReason = WIFI_REASON_UNSPECIFIED;
 
 void startAccessPoint() {
   WiFi.softAPConfig(config::AP_IP, config::AP_IP, config::AP_SUBNET);
-  WiFi.softAP(config::AP_SSID, config::AP_PASSWORD);
+  WiFi.softAP(config::AP_SSID, state::apPassword.c_str());
 }
 
 // The responder binds to the interfaces that exist when it starts and
@@ -101,6 +109,7 @@ void handleNtpSync() {
 void startRadio() {
   staConnected = false;
   staGaveUp    = false;
+  staOnlyApTeardown = false;
   lastDisconnectReason = WIFI_REASON_UNSPECIFIED;
 
   if (state::wifiMode == config::WIFI_MODE_AP_ONLY || state::staSsid.length() == 0) {
@@ -146,6 +155,19 @@ bool validateCredentials(uint8_t mode, String& ssid, String& pass, String& reaso
   return true;
 }
 
+// Reuse the saved password when the caller reconnects to the network that is
+// already stored. The dashboard never echoes the secret back to the browser,
+// so a reconnect leaves the password field blank — and that blank must mean
+// "use the saved password", never "this network is now open". Without this
+// guard the blank would be written over the stored password in RAM, NVS and
+// the WiFi driver's flash config, which is exactly the "password lost after
+// Disconnect" symptom.
+void reuseSavedPassword(String& ssid, String& pass) {
+  if (pass.length() == 0 && ssid.equalsIgnoreCase(state::staSsid)) {
+    pass = state::staPass;
+  }
+}
+
 void onLinkEstablished() {
   staConnected = true;
   staError     = "";
@@ -154,11 +176,29 @@ void onLinkEstablished() {
   core::eventlog::add("WiFi connected: %s", WiFi.localIP().toString().c_str());
   startNtp();
   if (state::wifiMode == config::WIFI_MODE_STA_ONLY) {
-    WiFi.softAPdisconnect(true);
-    WiFi.mode(WIFI_STA);
-    Serial.println(F("[WiFi] STA_ONLY: Access Point stopped"));
+    // Station Only — but do NOT drop the SoftAP yet: a browser connected to
+    // it must learn the new STA address and be handed off before the AP can
+    // disappear. The AP is retired from handleStation() once the grace
+    // period has passed and no client is associated any more.
+    staOnlyApTeardown   = true;
+    staOnlyApTeardownAt = millis();
+    Serial.println(F("[WiFi] STA_ONLY: AP kept alive for client handoff"));
   }
   restartMdns();
+}
+
+// Station Only cleanup: once the handoff grace has passed and no client is
+// associated to the SoftAP any more, drop it so the install returns to a
+// true station-only node. If a client is still attached, the AP stays up —
+// the transition must never strand a connected dashboard.
+void retireApIfIdle() {
+  if (!staOnlyApTeardown || !staConnected) return;
+  if ((millis() - staOnlyApTeardownAt) < config::STA_ONLY_AP_GRACE_MS) return;
+  if (WiFi.softAPgetStationNum() > 0) return;
+  staOnlyApTeardown = false;
+  WiFi.softAPdisconnect(true);
+  WiFi.mode(WIFI_STA);
+  Serial.println(F("[WiFi] STA_ONLY: Access Point stopped (idle)"));
 }
 
 // Records the reason code from the STA disconnect event. Called from the WiFi
@@ -169,6 +209,7 @@ void onStaDisconnected(const arduino_event_info_t& info) {
 
 void onLinkLost() {
   staConnected  = false;
+  staOnlyApTeardown = false;   // a fresh link may re-arm it; AP stays up meanwhile
   ntpConfigured = false;   // re-register NTP on the next link
   Serial.println(F("[WiFi] STA link lost — retrying"));
   core::eventlog::add("WiFi disconnected");
@@ -209,6 +250,7 @@ void classifyConnectError() {
 void onConnectTimeout() {
   staGaveUp   = true;
   staGaveUpAt = millis();
+  staOnlyApTeardown = false;   // runtime fallback is AP only
   classifyConnectError();
   Serial.printf("[WiFi] STA connect to \"%s\" failed after %lus — falling back to AP\n",
                 state::staSsid.c_str(), config::STA_CONNECT_TIMEOUT_MS / 1000);
@@ -230,6 +272,11 @@ void begin() {
     },
     ARDUINO_EVENT_WIFI_STA_DISCONNECTED);
   startRadio();
+  // Mains-powered device: disable WiFi modem-sleep power save. The core's
+  // default WIFI_PS_MIN_MODEM lets the radio sleep between beacons, which
+  // delays softAP beacon/response delivery and is a documented cause of AP
+  // clients seeing lag or random disconnects — worst in AP+STA coexistence.
+  WiFi.setSleep(false);
 }
 
 void handleStation() {
@@ -242,6 +289,8 @@ void handleStation() {
   }
 
   handleNtpSync();
+
+  retireApIfIdle();   // Station Only: drop the AP once the handoff is done
 
   if (userDisconnected) return;   // user chose to stay off until reconnecting
 
@@ -283,6 +332,10 @@ void handleStation() {
 
 bool isStationConnected() { return staConnected; }
 
+// True while the user has explicitly disconnected the station; the device
+// stays off the router until they reconnect or a new config is applied.
+bool isStationOff() { return userDisconnected; }
+
 const String& lastError() { return staError; }
 
 bool hasNtpSync() { return ntpSyncEpoch != 0; }
@@ -295,6 +348,9 @@ bool applyConfiguration(uint8_t mode, const String& ssid, const String& pass,
                         String& reason) {
   String workingSsid = ssid;
   String workingPass = pass;
+  // Reconnecting to the already-saved network with a blank password must
+  // reuse the stored one instead of overwriting it.
+  reuseSavedPassword(workingSsid, workingPass);
   if (!validateCredentials(mode, workingSsid, workingPass, reason)) return false;
 
   state::wifiMode = mode;
@@ -314,6 +370,9 @@ bool connectNow(uint8_t mode, const String& ssid, const String& pass,
                 String& reason) {
   String workingSsid = ssid;
   String workingPass = pass;
+  // Same-network reconnect with a blank password field: reuse the stored
+  // password instead of saving an empty one over it.
+  reuseSavedPassword(workingSsid, workingPass);
   if (workingSsid.length() == 0) {
     reason = F("ssid required");
     return false;
@@ -330,6 +389,7 @@ bool connectNow(uint8_t mode, const String& ssid, const String& pass,
   state::staPass  = workingPass;
   staConnected    = false;
   staGaveUp       = false;
+  staOnlyApTeardown = false;
   staError        = "";
   lastDisconnectReason = WIFI_REASON_UNSPECIFIED;
   userDisconnected = false;   // an explicit connect overrides a manual disconnect
@@ -354,10 +414,20 @@ void disconnectStation() {
   userDisconnected = true;
   staConnected = false;
   staGaveUp    = false;
+  staOnlyApTeardown = false;   // user wants the station off — AP stays up
   staError     = "";
-  WiFi.disconnect(true);   // drop the link, keep saved credentials in NVS
+  // Cancel any deferred radio reconfigure: the user explicitly wants the
+  // station off, and handleStation() would otherwise re-associate it a
+  // second later when the queued applyConfiguration() fires.
+  applyPending = false;
+  // wifioff=false drops only the station link (esp_wifi_disconnect) and
+  // leaves the radio/AP running. wifioff=true would call esp_wifi_stop()
+  // and tear the whole radio down — in AP+STA nothing below restarts it
+  // and the dashboard would go unreachable. Saved credentials stay in NVS.
+  WiFi.disconnect(false, false);   // drop the link, keep saved credentials in NVS
   if (state::wifiMode == config::WIFI_MODE_STA_ONLY) {
-    // Bring the AP back so the dashboard stays reachable.
+    // Station Only may have retired the AP once it went idle; bring it
+    // back so the dashboard stays reachable.
     WiFi.mode(WIFI_AP_STA);
     startAccessPoint();
   }
@@ -370,10 +440,15 @@ void forgetNetwork() {
   userDisconnected = true;
   staConnected = false;
   staGaveUp    = false;
+  staOnlyApTeardown = false;   // dropping to AP only — nothing to retire
   staError     = "";
   state::staSsid = "";
   state::staPass = "";
   state::wifiMode = config::WIFI_MODE_AP_ONLY;   // station modes need an SSID
+  // Cancel any deferred applyConfiguration(): the credentials it would
+  // start the radio with are now erased, and the redundant AP restart a
+  // second later would needlessly drop whatever client just reconnected.
+  applyPending = false;
   nvs::forceSave();                              // credentials must not survive
   WiFi.disconnect(true);
   WiFi.mode(WIFI_AP);
@@ -383,13 +458,31 @@ void forgetNetwork() {
   core::eventlog::add("WiFi network forgotten");
 }
 
-String scanNetworksJson() {
-  int found = WiFi.scanNetworks(false, false);   // synchronous, skip hidden
-  if (found < 0) found = 0;
+bool scanStart() {
+  // A scan is already in flight — nothing to do, the same result will be
+  // collected by the next scanPollJson().
+  if (WiFi.scanComplete() == WIFI_SCAN_RUNNING) return true;
+  WiFi.scanDelete();                                   // clear stale results
+  // async = true: the WiFi driver scans in its own task and the loop task
+  // (web server, relays, NVS) is never blocked by it.
+  return (WiFi.scanNetworks(true, false) != WIFI_SCAN_FAILED);
+}
 
-  String out = F("{\"networks\":[");
+String scanPollJson() {
+  const int16_t state = WiFi.scanComplete();
+  if (state == WIFI_SCAN_RUNNING) {
+    return F("{\"status\":\"running\"}");
+  }
+  if (state == WIFI_SCAN_FAILED) {
+    WiFi.scanDelete();
+    return F("{\"status\":\"error\",\"msg\":\"scan failed\"}");
+  }
+
+  // state >= 0 — the scan finished. Serialise the visible networks, then
+  // free the result buffer so a future scanStart() can begin cleanly.
+  String out = F("{\"status\":\"ok\",\"networks\":[");
   int added = 0;
-  for (int i = 0; i < found && added < config::MAX_SCAN_RESULTS; i++) {
+  for (int i = 0; i < state && added < config::MAX_SCAN_RESULTS; i++) {
     const String ssid = WiFi.SSID(i);
     if (ssid.length() == 0) continue;            // hidden network
     if (added++) out += ',';

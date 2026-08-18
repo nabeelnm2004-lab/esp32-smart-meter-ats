@@ -165,7 +165,9 @@ extern uint32_t lastTimeSyncEpoch;
 extern uint8_t wifiMode;      // config::WifiMode
 extern String  staSsid;
 extern String  staPass;
-extern String  otaPassword;   // also the dashboard Basic-auth password
+extern String  apPassword;
+extern String  otaPassword;   // also the dashboard Admin Basic-auth password
+extern String  viewerPassword; // dashboard Viewer Basic-auth password
 
 // ------------------------------------------------------------
 //  Deferred actions

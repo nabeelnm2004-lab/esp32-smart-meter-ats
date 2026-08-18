@@ -43,6 +43,8 @@ struct SettingsShadow {
   String   wssid;
   String   wpass;
   String   otapass;
+  String   appass;
+  String   viewpass;
   bool     valid;
 };
 
@@ -92,7 +94,7 @@ void save() {
   bool     emergSnap, bypassSnap;
   uint8_t  rstmonSnap, rdaySnap, wmodeSnap;
   uint16_t rstyrSnap;
-  String   wssidSnap, wpassSnap, otapassSnap;
+  String   wssidSnap, wpassSnap, otapassSnap, appassSnap, viewpassSnap;
 
   STATE_LOCK();
   for (int i = 0; i < config::MAX_METERS; i++) {
@@ -122,6 +124,8 @@ void save() {
   wssidSnap   = state::staSsid;
   wpassSnap   = state::staPass;
   otapassSnap = state::otaPassword;
+  appassSnap  = state::apPassword;
+  viewpassSnap= state::viewerPassword;
   // Clear the dirty flag while still holding the lock: anything dirtied
   // AFTER this snapshot re-raises it and is picked up by the next flush
   // instead of being lost.
@@ -147,7 +151,8 @@ void save() {
         shadow.lmon   != rstmonSnap  || shadow.lyear   != rstyrSnap   ||
         shadow.rday   != rdaySnap    || shadow.wmode   != wmodeSnap   ||
         shadow.wssid  != wssidSnap   || shadow.wpass   != wpassSnap   ||
-        shadow.otapass!= otapassSnap ||
+        shadow.otapass!= otapassSnap || shadow.appass  != appassSnap  ||
+        shadow.viewpass!= viewpassSnap||
         memcmp(shadow.daily, dailySnap, sizeof(dailySnap)) != 0;
     for (int i = 0; !changed && i < config::MAX_METERS; i++) {
       changed = (shadow.lim[i] != limSnap[i]) || (shadow.en[i] != enSnap[i]);
@@ -203,6 +208,8 @@ void save() {
   if (force || shadow.wssid   != wssidSnap)   prefs.putString("wssid",  wssidSnap);
   if (force || shadow.wpass   != wpassSnap)   prefs.putString("wpass",  wpassSnap);
   if (force || shadow.otapass != otapassSnap) prefs.putString("otapass", otapassSnap);
+  if (force || shadow.appass  != appassSnap)  prefs.putString("appass",  appassSnap);
+  if (force || shadow.viewpass!= viewpassSnap)prefs.putString("viewpass",viewpassSnap);
   prefs.end();
 
   // NVS now matches the snapshot — update the shadow so the next save
@@ -221,7 +228,8 @@ void save() {
   shadow.lmon    = rstmonSnap;  shadow.lyear  = rstyrSnap;   shadow.rday = rdaySnap;
   shadow.wmode   = wmodeSnap;
   shadow.wssid   = wssidSnap;   shadow.wpass  = wpassSnap;
-  shadow.otapass = otapassSnap;
+  shadow.otapass = otapassSnap; shadow.appass = appassSnap;
+  shadow.viewpass= viewpassSnap;
   shadow.valid   = true;
 
   lastWrite = millis();
@@ -257,6 +265,8 @@ void seedShadow() {
   shadow.wssid   = state::staSsid;
   shadow.wpass   = state::staPass;
   shadow.otapass = state::otaPassword;
+  shadow.appass  = state::apPassword;
+  shadow.viewpass= state::viewerPassword;
   shadow.valid   = true;
 }
 
@@ -383,6 +393,16 @@ void load() {
   state::otaPassword = prefs.getString("otapass", config::DEFAULT_OTA_PASSWORD);
   if (state::otaPassword.length() == 0) {
     state::otaPassword = config::DEFAULT_OTA_PASSWORD;
+  }
+  
+  state::apPassword = prefs.getString("appass", config::AP_PASSWORD);
+  if (state::apPassword.length() == 0) {
+    state::apPassword = config::AP_PASSWORD;
+  }
+  
+  state::viewerPassword = prefs.getString("viewpass", config::VIEWER_PASSWORD);
+  if (state::viewerPassword.length() == 0) {
+    state::viewerPassword = config::VIEWER_PASSWORD;
   }
   prefs.end();
 

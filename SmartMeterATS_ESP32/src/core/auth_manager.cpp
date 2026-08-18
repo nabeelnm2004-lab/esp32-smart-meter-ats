@@ -26,7 +26,7 @@ Role identify(WebServer& server) {
   if (server.authenticate(config::AUTH_USER, state::otaPassword.c_str())) {
     return ROLE_ADMIN;
   }
-  if (server.authenticate(config::AUTH_VIEWER_USER, config::VIEWER_PASSWORD)) {
+  if (server.authenticate(config::AUTH_VIEWER_USER, state::viewerPassword.c_str())) {
     return ROLE_VIEWER;
   }
   return ROLE_NONE;

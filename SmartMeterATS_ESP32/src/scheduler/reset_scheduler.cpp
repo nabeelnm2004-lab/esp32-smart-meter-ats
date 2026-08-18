@@ -35,11 +35,21 @@ void performMonthlyReset(const DateTime& now) {
 
   for (int i = 0; i < config::MAX_METERS; i++) state::meters[i].energyUsed = 0.0f;
   state::pzemEnergyBase = state::liveEnergy;
-  // A new billing period starts every meter with a fresh allowance, so
-  // an emergency latch raised by the previous period's exhaustion is
-  // no longer meaningful.
-  state::emergencyOff = false;
-  relay::switchToMeter(relay::firstEnabledMeter());
+
+  // Emergency OFF is a hard operator latch — the scheduler must never
+  // clear it automatically. Likewise, a protection fault must not be
+  // overridden by a calendar event. In both cases the counter/bookkeeping
+  // reset above still runs (the billing period is over regardless), but
+  // relays stay in whatever safe state the latch demands.
+  if (!state::emergencyOff && !state::protTrip) {
+    relay::switchToMeter(relay::firstEnabledMeter());
+  } else {
+    // Correct the meter selection without energising, so the next explicit
+    // clear goes to the right meter.
+    state::activeMeter = relay::firstEnabledMeter();
+    Serial.println(F("[RESET] Monthly reset — relays held OFF (emergency/fault active)"));
+    core::eventlog::add("Monthly reset — relays held OFF (emergency/fault active)");
+  }
 
   uint16_t periodYear;
   uint8_t  periodMonth;

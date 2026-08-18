@@ -177,7 +177,7 @@ constexpr uint16_t MAX_VALID_YEAR  = 2099;
 // ------------------------------------------------------------
 constexpr const char* AP_SSID     = "SmartMeterATS";
 constexpr const char* AP_PASSWORD = "12345678";
-constexpr const char* MDNS_HOSTNAME = "smartmeterats";
+constexpr const char* MDNS_HOSTNAME = "smartats";
 constexpr const char* OTA_HOSTNAME  = "SmartMeterATS";
 constexpr const char* DEFAULT_OTA_PASSWORD = "smartats123";
 // HTTP Basic auth user for the mutating endpoints. The password is
@@ -195,6 +195,12 @@ extern const IPAddress AP_IP;
 extern const IPAddress AP_SUBNET;
 
 constexpr unsigned long STA_CONNECT_TIMEOUT_MS = 30000UL;
+// Station Only mode keeps its SoftAP alive after the station link is
+// proven so a browser connected to the AP can be handed off to the router
+// (mDNS / STA IP) before the AP disappears. The AP is retired only after
+// this grace period AND once no client is associated to it any more — it
+// must never strand a connected dashboard.
+constexpr unsigned long STA_ONLY_AP_GRACE_MS = 15000UL;
 // Named SSID_MAX_LENGTH/PASS_MAX_LENGTH (not MAX_SSID_LEN) because the
 // ESP32 core >= 3.3 defines MAX_SSID_LEN as a macro in
 // esp_wifi_types_generic.h, which would replace the constexpr identifier.

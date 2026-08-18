@@ -34,6 +34,10 @@ Result requestSwitch(int meterIndex) {
   // Relays belong to the user while test mode is active.
   if (state::testMode) {
     err = "test mode active";
+  } else if (state::emergencyOff) {
+    // Emergency OFF is a hard latch: a manual meter switch must never
+    // silently clear it. Use /api/clearEmergency for that.
+    err = "emergency off active";
   } else if (state::protTrip) {
     err = "protection trip active";
   } else if (meterIndex >= 0 && meterIndex < state::activeMeterCount &&
@@ -43,7 +47,6 @@ Result requestSwitch(int meterIndex) {
         state::meters[meterIndex].energyUsed >= state::meters[meterIndex].energyLimit) {
       err = "meter limit reached";
     } else {
-      state::emergencyOff   = false;
       state::pzemEnergyBase = state::liveEnergy;
       relay::switchToMeter(meterIndex);
       done = true;
@@ -87,6 +90,39 @@ Result requestClearFault() {
     eventlog::add("Fault cleared");
     nvs::forceSave();   // critical event
   }
+  return OK_RESULT;
+}
+
+// Explicitly clear the Emergency OFF latch. Rejected if a protection
+// trip is still active (operator must clear the fault first). If bypass
+// mode is also active the relay is restored but the bypass latch is
+// intentionally preserved — the operator enabled it deliberately and
+// clearing an emergency must not silently change the scheduling mode.
+Result requestClearEmergency() {
+  STATE_LOCK();
+  if (!state::emergencyOff) {
+    // Idempotent: already clear — nothing to do, still a success.
+    STATE_UNLOCK();
+    return OK_RESULT;
+  }
+  if (state::protTrip) {
+    // Priority enforcement: a protection fault outranks Emergency OFF.
+    // The operator must resolve the fault via /api/clearFault first.
+    STATE_UNLOCK();
+    return fail("protection fault active — clear fault first");
+  }
+  state::emergencyOff = false;
+  // Re-energise the active meter through the normal pending-switch path.
+  // handlePendingSwitch() will re-check every latch before firing the
+  // relay, so no load can be energised past a concurrent trip.
+  relay::switchToMeter(state::activeMeter);
+  STATE_UNLOCK();
+
+
+  Serial.println(F("[EMERG] Emergency OFF cleared"));
+  eventlog::add("Emergency OFF cleared%s",
+                state::bypassMode ? " (bypass still active)" : "");
+  nvs::forceSave();   // critical state change — must survive an unexpected reboot
   return OK_RESULT;
 }
 

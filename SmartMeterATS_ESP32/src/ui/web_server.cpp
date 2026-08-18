@@ -129,10 +129,14 @@ void handleStatus() {
   doc["wifiMode"]   = state::wifiMode;
   doc["staSsid"]    = state::staSsid;
   doc["staOK"]      = wifi::isStationConnected();
+  doc["staOff"]     = wifi::isStationOff();
   doc["staIP"]      = wifi::isStationConnected() ? WiFi.localIP().toString() : "";
   doc["apIP"]       = WiFi.softAPIP().toString();
   doc["staRssi"]    = wifi::isStationConnected() ? WiFi.RSSI() : 0;
   doc["staFallback"] = wifi::inApFallback();
+  // mDNS name — lets the dashboard hand a browser on the (soon retired) AP
+  // over to the station address during the AP -> STA transition.
+  doc["hostname"]   = String(config::MDNS_HOSTNAME) + ".local";
   doc["otaReady"]   = ota::isReady();
   doc["testMode"]   = state::testMode;
   doc["testLeft"]   = state::testMode
@@ -184,6 +188,7 @@ void handleWifiStatus() {
   StaticJsonDocument<config::JSON_WIFI_STATUS_SIZE> doc;
   doc["mode"]    = state::wifiMode;
   doc["staOK"]   = wifi::isStationConnected();
+  doc["staOff"]  = wifi::isStationOff();
   doc["ssid"]    = state::staSsid;
   doc["staIP"]   = wifi::isStationConnected() ? WiFi.localIP().toString() : "";
   doc["apIP"]    = WiFi.softAPIP().toString();
@@ -195,9 +200,19 @@ void handleWifiStatus() {
   json::sendJson(server, out);
 }
 
-// GET /api/scanWiFi — list visible networks (blocking scan).
+// GET /api/scanWiFi/start — begin an asynchronous scan. Returns instantly;
+// the loop task and every other HTTP request keep running while the WiFi
+// driver scans in its own task. Poll /api/scanWiFi for the result.
+void handleScanWiFiStart() {
+  if (wifi::scanStart()) json::sendOk(server);
+  else                   json::sendError(server, 500, F("scan start failed"));
+}
+
+// GET /api/scanWiFi — poll the in-flight scan. {"status":"running"} while
+// it is still going; the {"networks":[...]} payload once it has finished.
+// Never blocks.
 void handleScanWiFi() {
-  json::sendJson(server, wifi::scanNetworksJson());
+  json::sendJson(server, wifi::scanPollJson());
 }
 
 // GET /api/disconnectWiFi — drop the station link, keep the AP.
@@ -258,7 +273,7 @@ void handleSysInfo() {
     rr == ESP_RST_TASK_WDT ? "Watchdog"    :
     rr == ESP_RST_BROWNOUT ? "Brownout"    : "Other";
   doc["rssi"] = wifi::isStationConnected() ? WiFi.RSSI() : 0;
-  doc["hostname"] = "smartmeterats.local";
+  doc["hostname"] = String(config::MDNS_HOSTNAME) + ".local";
   doc["ip"]   = wifi::currentIp();
   doc["timeSrc"] = state::rtcOK        ? "RTC (DS3231)"
                  : wifi::hasNtpSync()  ? "NTP"
@@ -390,6 +405,14 @@ void handleResetEnergy() {
 // GET /api/emergency — authenticated hard OFF.
 void handleEmergency() {
   sendResult(controller::requestEmergencyOff("web"), 409);
+}
+
+// GET /api/clearEmergency — explicitly clear the Emergency OFF latch and
+// restore normal operation. Rejected (409) if a protection trip is still
+// active, since protection outranks emergency in the priority stack.
+// Requires Admin auth (same as /api/emergency). Idempotent when not set.
+void handleClearEmergency() {
+  sendResult(controller::requestClearEmergency(), 409);
 }
 
 // GET /api/setProtection?ov=&uv=&oc= — thresholds, each clamped to its
@@ -557,6 +580,63 @@ void handleSetTime() {
   json::sendError(server, 400, F("invalid date/time"));
 }
 
+// POST /api/setPasswords — safely update credentials.
+// Expects JSON: { "curAdmin": "...", "newAdmin": "...", "newViewer": "...", "newAp": "..." }
+void handleSetPasswords() {
+  StaticJsonDocument<256> doc;
+  DeserializationError err = deserializeJson(doc, server.arg("plain"));
+  if (err) { json::sendError(server, 400, F("invalid JSON")); return; }
+  
+  if (!doc.containsKey("curAdmin")) { json::sendError(server, 400, F("current admin password required")); return; }
+  String curAdmin = doc["curAdmin"].as<String>();
+  
+  STATE_LOCK();
+  if (curAdmin != state::otaPassword) {
+    STATE_UNLOCK();
+    json::sendError(server, 403, F("current admin password incorrect"));
+    return;
+  }
+  
+  bool changed = false;
+  bool apChanged = false;
+  
+  if (doc.containsKey("newAdmin")) {
+    String p = doc["newAdmin"].as<String>();
+    if (p.length() >= 8 && p.length() <= config::PASS_MAX_LENGTH) {
+      state::otaPassword = p;
+      changed = true;
+    }
+  }
+  if (doc.containsKey("newViewer")) {
+    String p = doc["newViewer"].as<String>();
+    if (p.length() >= 8 && p.length() <= config::PASS_MAX_LENGTH) {
+      state::viewerPassword = p;
+      changed = true;
+    }
+  }
+  if (doc.containsKey("newAp")) {
+    String p = doc["newAp"].as<String>();
+    if (p.length() >= 8 && p.length() <= config::PASS_MAX_LENGTH) {
+      state::apPassword = p;
+      changed = true;
+      apChanged = true;
+    }
+  }
+  STATE_UNLOCK();
+  
+  if (changed) {
+    nvs::markDirty();
+    eventlog::add("Passwords updated");
+    if (apChanged && state::wifiMode != config::WIFI_MODE_STA_ONLY) {
+      // Defer a radio reconfigure so the AP drops and comes back up
+      String reason;
+      wifi::applyConfiguration(state::wifiMode, state::staSsid, state::staPass, reason);
+    }
+  }
+  
+  json::sendOk(server);
+}
+
 // GET /api/clearEvents — wipe the in-RAM event log.
 void handleClearEvents() {
   eventlog::clear();
@@ -674,7 +754,8 @@ void begin() {
   // Dashboard — served straight from PROGMEM.
   server.on("/", HTTP_GET, []() {
     json::sendCommonHeaders(server);
-    server.send_P(200, "text/html", ui::DASHBOARD_HTML);
+    server.sendHeader("Content-Encoding", "gzip");
+    server.send_P(200, "text/html", (const char*)ui::DASHBOARD_HTML_GZ, sizeof(ui::DASHBOARD_HTML_GZ));
   });
 
   // Read-only endpoints (no auth — telemetry only).
@@ -683,8 +764,10 @@ void begin() {
   // Scanning lists only SSIDs/rssi — no secrets, no state change — so it
   // is left unauthenticated. The dashboard shows the scan to anyone who
   // can reach the unit, exactly like a captive portal. Connecting still
-  // requires the Admin credential.
-  server.on("/api/scanWiFi",   HTTP_GET, handleScanWiFi);
+  // requires the Admin credential. The scan is asynchronous: the start
+  // route returns immediately and /api/scanWiFi is polled for the result.
+  server.on("/api/scanWiFi/start", HTTP_GET, handleScanWiFiStart);
+  server.on("/api/scanWiFi",       HTTP_GET, handleScanWiFi);
   server.on("/api/events",     HTTP_GET, handleEvents);
   server.on("/api/sysinfo",    HTTP_GET, handleSysInfo);
 
@@ -698,6 +781,7 @@ void begin() {
   server.on("/api/switchMeter",     HTTP_GET,  authed(handleSwitchMeter));
   server.on("/api/resetEnergy",     HTTP_GET,  authed(handleResetEnergy));
   server.on("/api/emergency",       HTTP_GET,  authed(handleEmergency));
+  server.on("/api/clearEmergency",  HTTP_GET,  authed(handleClearEmergency));
   server.on("/api/setProtection",   HTTP_GET,  authed(handleSetProtection));
   server.on("/api/clearFault",      HTTP_GET,  authed(handleClearFault));
   server.on("/api/setActiveMeters", HTTP_GET,  authed(handleSetActiveMeters));
@@ -709,6 +793,7 @@ void begin() {
   server.on("/api/connectWiFi",     HTTP_GET,  authed(handleConnectWiFi));
   server.on("/api/disconnectWiFi",  HTTP_GET,  authed(handleDisconnectWiFi));
   server.on("/api/forgetWiFi",      HTTP_GET,  authed(handleForgetWiFi));
+  server.on("/api/setPasswords",    HTTP_POST, authed(handleSetPasswords));
   server.on("/api/clearEvents",     HTTP_GET,  authed(handleClearEvents));
   server.on("/api/restore",         HTTP_POST, authed(handleRestore));
   server.on("/api/factoryReset",    HTTP_GET,  authed(handleFactoryReset));

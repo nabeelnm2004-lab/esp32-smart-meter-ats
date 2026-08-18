@@ -36,6 +36,11 @@ void handleStation();
 // True once the station link is up.
 bool isStationConnected();
 
+// True while the station link was dropped by an explicit user disconnect
+// (disconnectStation()); the device stays off the router until the user
+// reconnects or a new configuration is applied.
+bool isStationOff();
+
 // Reason the last station attempt failed, empty while none has.
 const String& lastError();
 
@@ -59,9 +64,18 @@ bool applyConfiguration(uint8_t mode, const String& ssid, const String& pass,
 bool connectNow(uint8_t mode, const String& ssid, const String& pass,
                 String& reason);
 
-// Serialise the visible networks as the "networks" array documented in
-// docs/api_rules.md. Blocking: a scan takes a couple of seconds.
-String scanNetworksJson();
+// Start an asynchronous network scan. Returns immediately and does not
+// block the radio or the loop task; the result is collected on a later
+// scanPollJson() call. Safe to call while a scan is already running.
+// Returns false only when the scan driver refuses to start.
+bool scanStart();
+
+// Non-blocking poll of the in-flight scan. Returns
+//   {"status":"running"}                  while the scan is still in the air,
+//   {"status":"error","msg":"..."}        when the scan driver failed, or
+//   {"status":"ok","networks":[...]}      once the scan has finished.
+// Consumes (and frees) the result buffer the first time it returns done.
+String scanPollJson();
 
 // True while the station attempt has given up and the radio is running
 // AP only (fell back after the connect timeout). Distinct from "never
