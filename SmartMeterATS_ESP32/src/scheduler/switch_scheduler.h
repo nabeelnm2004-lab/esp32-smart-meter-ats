@@ -2,9 +2,11 @@
  * switch_scheduler.h — automatic limit-based meter switching.
  *
  * Watches the active meter's usage against its energy limit and moves
- * to the next enabled meter once the limit is reached. This is the
- * only automatic switching policy in the firmware; manual switching
- * lives in core::controller.
+ * to the enabled meter with the most allowance remaining once the
+ * limit is reached. When every meter is at its limit the load stays
+ * on the current meter instead of bouncing between exhausted meters.
+ * This is the only automatic switching policy in the firmware; manual
+ * switching lives in core::controller.
  *
  * Suspended while bypass mode, relay test mode, an emergency latch or
  * a protection trip is active, and while a switch is already in

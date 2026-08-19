@@ -30,9 +30,11 @@ bool switchIfLimitReached() {
   Serial.printf("[SWITCH] Meter %d limit (%.2f kWh) reached\n",
                 state::activeMeter + 1, active.energyLimit);
 
-  const int next = relay::nextEnabledMeter(state::activeMeter);
-  if (next == state::activeMeter) {
-    Serial.println(F("[SWITCH] All meters exhausted or disabled"));
+  // Pick the meter with the most allowance left so leftover units are
+  // used before a nearly-exhausted meter is touched again.
+  const int next = relay::fullestAvailableMeter();
+  if (next < 0) {
+    Serial.println(F("[SWITCH] All meters at limit — staying on current meter"));
     return false;
   }
 

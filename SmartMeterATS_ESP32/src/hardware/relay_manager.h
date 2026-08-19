@@ -54,6 +54,13 @@ bool isOn(int meterIndex);
 int nextEnabledMeter(int current);
 int firstEnabledMeter();
 
+// Enabled meter with the most allowance left (skips meters that already
+// reached their energy limit; energyLimit <= 0 is unlimited and always
+// wins). Returns -1 when every meter is disabled or exhausted, so the
+// caller can stay on the current meter instead of bouncing the load.
+// Caller must hold the state lock.
+int fullestAvailableMeter();
+
 }  // namespace relay
 }  // namespace hardware
 

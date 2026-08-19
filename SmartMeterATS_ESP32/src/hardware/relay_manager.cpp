@@ -95,6 +95,26 @@ int nextEnabledMeter(int current) {
   return current;   // nothing else enabled
 }
 
+// Enabled meter with the most allowance left (energyLimit <= 0 means
+// unlimited and always wins). Exhausted meters are skipped. Returns -1
+// when every meter is disabled or at its limit, so the auto-switch can
+// stay put instead of bouncing the load between exhausted meters.
+int fullestAvailableMeter() {
+  int   best         = -1;
+  float bestRemaining = -1.0f;
+  for (int i = 0; i < state::activeMeterCount; i++) {
+    if (!state::meters[i].enabled) continue;
+    if (state::meters[i].energyLimit <= 0) return i;   // unlimited is fullest
+    const float remaining = state::meters[i].energyLimit - state::meters[i].energyUsed;
+    if (remaining <= 0) continue;   // exhausted — skip
+    if (remaining > bestRemaining) {
+      bestRemaining = remaining;
+      best          = i;
+    }
+  }
+  return best;   // -1 when no meter has allowance left
+}
+
 int firstEnabledMeter() {
   for (int i = 0; i < state::activeMeterCount; i++) {
     if (state::meters[i].enabled) return i;
